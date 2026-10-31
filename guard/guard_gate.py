@@ -43,7 +43,7 @@ def _store():
         会让 guard 的加载变慢，而且一旦出错连 guard 都用不了。
     """
     try:
-        import count_store as c
+        from . import count_store as c
 
         return c
     except Exception:  # noqa: BLE001
@@ -165,7 +165,7 @@ def reset_after_pass() -> None:
 
 def _guard():
     """拿 guard 模块。延迟导入，避免循环依赖。"""
-    import guard as g
+    from . import guard as g
 
     return g
 

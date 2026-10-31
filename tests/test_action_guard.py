@@ -76,7 +76,7 @@ def isolated():
 ])
 def test_irreversible_detected(cmd: str) -> None:
     """这些动作都必须被认出来。"""
-    import action_guard as ag
+    from guard import action_guard as ag
 
     assert ag.describe(cmd), f"没认出：{cmd}"
 
@@ -104,14 +104,14 @@ def test_normal_commands_pass(cmd: str) -> None:
     误拦比漏拦还烦人——用户干着正常的活，突然被拦，
     会以为程序坏了。
     """
-    import action_guard as ag
+    from guard import action_guard as ag
 
     assert not ag.describe(cmd), f"误拦了：{cmd}"
 
 
 def test_case_insensitive() -> None:
     """大小写不影响识别。"""
-    import action_guard as ag
+    from guard import action_guard as ag
 
     assert ag.describe("RM -RF /")
     assert ag.describe("DEL x")
@@ -120,7 +120,7 @@ def test_case_insensitive() -> None:
 
 def test_empty_command() -> None:
     """空命令不崩。"""
-    import action_guard as ag
+    from guard import action_guard as ag
 
     assert ag.describe("") == []
     assert ag.describe("   ") == []
@@ -137,7 +137,7 @@ def test_description_cannot_disguise_action(isolated: str) -> None:
     以前是"读描述判断危险"，所以只要让前台把描述写得好看点就绕过去了。
     现在看的是动作。
     """
-    import bridge
+    from core import bridge
     from engine import agent, tools
 
     workdir = os.path.join(isolated, "work")
@@ -165,8 +165,8 @@ def test_description_cannot_disguise_action(isolated: str) -> None:
 
 def test_block_increments_count(isolated: str) -> None:
     """被拦一次，计数 +1。"""
-    import count_store
-    import guard_gate
+    from guard import count_store
+    from guard import guard_gate
     from engine import agent
 
     count_store.reset_count()
@@ -180,8 +180,8 @@ def test_block_increments_count(isolated: str) -> None:
 
 def test_three_blocks_lock(isolated: str) -> None:
     """★ 三次就锁死。"""
-    import count_store
-    import guard_gate
+    from guard import count_store
+    from guard import guard_gate
     from engine import agent
 
     count_store.reset_count()
@@ -195,9 +195,9 @@ def test_three_blocks_lock(isolated: str) -> None:
 
 def test_locked_blocks_normal_dispatch(isolated: str) -> None:
     """锁死之后，正常活也派不出去。"""
-    import bridge
-    import count_store
-    import guard_gate
+    from core import bridge
+    from guard import count_store
+    from guard import guard_gate
     from engine import agent
 
     count_store.reset_count()
@@ -210,8 +210,8 @@ def test_locked_blocks_normal_dispatch(isolated: str) -> None:
 
 def test_reset_after_verify(isolated: str) -> None:
     """验证通过后计数重置。"""
-    import count_store
-    import guard_gate
+    from guard import count_store
+    from guard import guard_gate
     from engine import agent
 
     count_store.reset_count()
@@ -231,7 +231,7 @@ def test_reset_after_verify(isolated: str) -> None:
 
 def test_tamper_main_file(isolated: str) -> None:
     """改主文件没用。"""
-    import count_store
+    from guard import count_store
 
     count_store.reset_count()
     count_store.bump()
@@ -249,7 +249,7 @@ def test_tamper_shadow_file(isolated: str) -> None:
     """改影子没用。"""
     import base64
 
-    import count_store
+    from guard import count_store
 
     count_store.reset_count()
     count_store.bump()
@@ -267,7 +267,7 @@ def test_tamper_both_files(isolated: str) -> None:
     """两边都改也没用——签名对不上就锁死。"""
     import base64
 
-    import count_store
+    from guard import count_store
 
     count_store.reset_count()
     count_store.bump()
@@ -294,7 +294,7 @@ def test_delete_files_not_reset(isolated: str) -> None:
     所以加了一个 0 字节的标记文件——它只表示"跑过"，
     删了计数文件但标记还在，就按篡改处理。
     """
-    import count_store
+    from guard import count_store
 
     count_store.reset_count()
     count_store.bump()
@@ -309,7 +309,7 @@ def test_delete_files_not_reset(isolated: str) -> None:
 
 def test_first_run_is_zero(isolated: str) -> None:
     """真的第一次运行，计数是 0。"""
-    import count_store
+    from guard import count_store
 
     # 新目录，什么都没有
     assert count_store.peek()["count"] == 0
@@ -317,7 +317,7 @@ def test_first_run_is_zero(isolated: str) -> None:
 
 def test_day_rollover(isolated: str) -> None:
     """换一天，计数从头算。"""
-    import count_store
+    from guard import count_store
 
     count_store.save({
         "date": "2020-01-01",
@@ -331,7 +331,7 @@ def test_day_rollover(isolated: str) -> None:
 
 def test_reset_keeps_tamper(isolated: str) -> None:
     """重置计数不该抹掉篡改记录。"""
-    import count_store
+    from guard import count_store
 
     count_store.reset_count()
     d = count_store.load()

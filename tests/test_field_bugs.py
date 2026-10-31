@@ -177,7 +177,7 @@ def test_api_perms_get_does_not_need_name():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
-        "api_server_t", os.path.join(_ROOT, "api_server.py")
+        "api_server_t", os.path.join(_ROOT, "server", "api_server.py")
     )
     api = importlib.util.module_from_spec(spec)
     try:
@@ -213,7 +213,7 @@ def test_perms_list_not_truncated(isolated):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
-        "api_server_t2", os.path.join(_ROOT, "api_server.py")
+        "api_server_t2", os.path.join(_ROOT, "server", "api_server.py")
     )
     api = importlib.util.module_from_spec(spec)
     try:
@@ -239,7 +239,7 @@ def test_perms_has_profile_field(isolated):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
-        "api_server_t3", os.path.join(_ROOT, "api_server.py")
+        "api_server_t3", os.path.join(_ROOT, "server", "api_server.py")
     )
     api = importlib.util.module_from_spec(spec)
     try:
@@ -314,7 +314,7 @@ def test_perm_change_persists(isolated):
     改是改了，但持久化失败（返回 True 实际没写），
     下次启动就丢了。
     """
-    import task_perms
+    from guard import task_perms
 
     task_perms.set_level("持久化测试", "full")
     assert task_perms.get_level("持久化测试") == "full"
@@ -335,8 +335,8 @@ def test_perm_escalation_needs_code(isolated):
 
     ⚠️ 这条测的是**接口层**的行为，用打桩绕过真发邮件。
     """
-    import guard
-    import task_perms
+    from guard import guard
+    from guard import task_perms
 
     # 打桩：不发真邮件
     def _fake_send(task, purpose=""):
@@ -355,7 +355,7 @@ def test_perm_escalation_needs_code(isolated):
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
-            "api_server_t4", os.path.join(_ROOT, "api_server.py")
+            "api_server_t4", os.path.join(_ROOT, "server", "api_server.py")
         )
         api = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(api)
@@ -390,7 +390,7 @@ def test_perm_wildcard_rejected(isolated):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
-        "api_server_t5", os.path.join(_ROOT, "api_server.py")
+        "api_server_t5", os.path.join(_ROOT, "server", "api_server.py")
     )
     api = importlib.util.module_from_spec(spec)
     try:
@@ -406,8 +406,8 @@ def test_perm_wildcard_rejected(isolated):
 
 def test_perm_code_bound_to_window(isolated):
     """给 A 发的码不能拿去改 B。"""
-    import guard
-    import task_perms
+    from guard import guard
+    from guard import task_perms
 
     def _fake_send(task, purpose=""):
         import time
@@ -425,7 +425,7 @@ def test_perm_code_bound_to_window(isolated):
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
-            "api_server_t6", os.path.join(_ROOT, "api_server.py")
+            "api_server_t6", os.path.join(_ROOT, "server", "api_server.py")
         )
         api = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(api)
@@ -470,7 +470,7 @@ def test_is_outside_platform_independent():
     """
     import tempfile
 
-    import action_guard as ag
+    from guard import action_guard as ag
 
     w = tempfile.mkdtemp()
 
@@ -499,7 +499,7 @@ def test_is_outside_relative_stays_inside():
     """
     import tempfile
 
-    import action_guard as ag
+    from guard import action_guard as ag
 
     w = tempfile.mkdtemp()
 

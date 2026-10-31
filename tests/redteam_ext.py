@@ -46,13 +46,13 @@ try:
 except Exception:
     pass
 
-import action_guard as ag          # noqa: E402
-import count_store                 # noqa: E402
-import guard                       # noqa: E402
-import guard_gate                  # noqa: E402
-import safe_path                   # noqa: E402
-import security                    # noqa: E402
-import task_perms                  # noqa: E402
+from guard import action_guard as ag          # noqa: E402
+from guard import count_store                 # noqa: E402
+from guard import guard                       # noqa: E402
+from guard import guard_gate                  # noqa: E402
+from guard import safe_path                   # noqa: E402
+from guard import security                    # noqa: E402
+from guard import task_perms                  # noqa: E402
 from engine import agent, tools    # noqa: E402
 
 IS_WIN = sys.platform == "win32"

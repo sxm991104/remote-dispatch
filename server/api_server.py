@@ -57,20 +57,29 @@ def _app_dir() -> str:
     """
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    # ⚠️ 这个文件现在住在 server/ 里。
+    #
+    #    运行数据（tasks.jsonl、state/、workspaces/）一直在仓库根目录。
+    #    如果按 __file__ 算，就变成 server/tasks.jsonl——
+    #    等于升级一次把历史任务全"丢了"。
+    #
+    #    所以往上退一层。
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _res_dir() -> str:
     """只读资源目录（html 等）。打包后在 _MEIPASS 里。"""
     if getattr(sys, "frozen", False):
         return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    # html 跟这个脚本放在一起（server/ 里）
     return os.path.dirname(os.path.abspath(__file__))
 
 
 BRIDGE_DIR = _app_dir()
+# 让 `from core import bridge` 找得到——脚本模式下 sys.path[0] 是 server/
 sys.path.insert(0, BRIDGE_DIR)
 
-import bridge  # noqa: E402
+from core import bridge  # noqa: E402
 
 # 桌面端要能自己起停服务，不经过任何命令行窗口。
 # launcher 模块就是干这个的，它把 bat 里的活重做成了 Python。
@@ -83,6 +92,57 @@ except Exception:  # noqa: BLE001
     _launcher = None
 
 DEFAULT_PORT = 8790
+
+
+def _profile_creds(pid: str, base: str = "") -> tuple[str, str]:
+    """从多套配置里取一套的 (base_url, api_key)。
+
+    优先级：
+        传了 id → 就找那套
+        没传   → active 那套
+        还没有 → 第一套启用的
+        都没有 → 退回旧的单套配置（兼容老数据）
+
+    为什么要有这个函数：
+        /api/engine/models 和 /api/engine/test 原来都直接读
+        engine_bridge.load_config()——那是旧单套配置。
+        现在配置是多套的，得按 id 找。
+    """
+    try:
+        from engine import profiles as _pf
+
+        data = _pf.load_all()
+        profs = data.get("profiles") or []
+
+        target = None
+        if pid:
+            target = next((x for x in profs if x.get("id") == pid), None)
+        if target is None:
+            act = data.get("active") or ""
+            target = next((x for x in profs if x.get("id") == act), None)
+        if target is None:
+            target = next((x for x in profs if x.get("enabled", True)), None)
+        if target is None and profs:
+            target = profs[0]
+        if target:
+            return (
+                (base or target.get("base_url") or "").strip(),
+                (target.get("api_key") or "").strip(),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 兜底：旧的单套配置
+    try:
+        from core import engine_bridge
+
+        cur = engine_bridge.load_config()
+        return (
+            (base or cur.get("base_url") or "").strip(),
+            (cur.get("api_key") or "").strip(),
+        )
+    except Exception:  # noqa: BLE001
+        return (base, "")
 
 
 def _json(obj, status: int = 200) -> tuple[int, bytes]:
@@ -234,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
             它是给"服务活没活着"用的，不碰任何数据，
             桌面端和启动器都要在拿 token 之前问它。
         """
-        import security as _sec
+        from guard import security as _sec
 
         # 第一层：只接受本机连接
         if not _sec.is_local_address(self.client_address[0]):
@@ -431,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/guard":
             try:
-                import guard
+                from guard import guard
 
                 c = guard.load_config()
                 return self._send(*_json({
@@ -518,7 +578,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, b'{"error":"name is required"}')
             # 名字先过一遍校验，不合法就直接拒，别让它在后面炸
             try:
-                from safe_path import safe_name as _sn
+                from guard.safe_path import safe_name as _sn
 
                 _sn(name)
             except ValueError as e:
@@ -589,7 +649,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/guard/test":
             try:
-                import guard
+                from guard import guard
 
                 ok, msg = guard.send_code_email(
                     "这是一封测试邮件，不需要做任何事",
@@ -601,7 +661,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/guard/code":
             try:
-                import guard
+                from guard import guard
 
                 task = self._str_field(body, "task")
                 purpose = self._str_field(body, "purpose")
@@ -619,7 +679,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/guard/check":
             try:
-                import guard
+                from guard import guard
 
                 task = self._str_field(body, "task")
                 if not task:
@@ -653,7 +713,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/guard/verify":
             try:
-                import guard
+                from guard import guard
 
                 task = self._str_field(body, "task")
                 code = self._str_field(body, "code")
@@ -710,7 +770,7 @@ class Handler(BaseHTTPRequestHandler):
             preset = (body.get("preset") or "").strip()
             effort = (body.get("effort") or "").strip()
             try:
-                import tune_model
+                from tools import tune_model
 
                 rec = tune_model.apply(preset, effort)
                 st, b = _json(rec, 200 if rec.get("status") == "ok" else 400)
@@ -792,6 +852,19 @@ class Handler(BaseHTTPRequestHandler):
                     "cost_cny": s.get("cost_cny"),
                     "result": s.get("result") or "",
                     "error": s.get("error") or "",
+
+                    # ⚠️ 这三个字段原来没给，前端就没法"按模型分组"。
+                    #
+                    #    桌面上想看到的是：
+                    #        DeepSeek  3/3   报告A write_file / 报告B 排队
+                    #        Kimi      1/3   登录页 读文件
+                    #
+                    #    没有 profile，只能给一张扁平表——
+                    #    用户和排查的人都看不出哪个任务跑在哪套模型上。
+                    "profile": t.get("profile") or s.get("profile") or "",
+                    "doing": s.get("doing") or "",
+                    "turns": s.get("turns"),
+                    "compactions": s.get("compactions"),
                 })
             # 最近更新的排前面
             out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
@@ -915,6 +988,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "add":
             prof = add_profile(body)
+            # add_profile 拦下来的时候不抛异常，只在返回值上挂 _error。
+            # 这里把它翻成接口层看得懂的失败。
+            err = prof.get("_error")
+            if err:
+                return {
+                    "ok": False,
+                    "error": err,
+                    "duplicate_of": prof.get("_duplicate_of") or "",
+                }
             return {"ok": True, "id": prof["id"]}
 
         if action == "update":
@@ -944,7 +1026,7 @@ class Handler(BaseHTTPRequestHandler):
         界面上不需要看到完整的 key，也不该看到。
         """
         try:
-            import engine_bridge
+            from core import engine_bridge
 
             c = engine_bridge.load_config()
             key = c.get("api_key") or ""
@@ -976,19 +1058,36 @@ class Handler(BaseHTTPRequestHandler):
         base = (body.get("base_url") or "").strip()
         key = (body.get("api_key") or "").strip()
 
-        import engine_bridge
-
-        cur = engine_bridge.load_config()
-        base = base or cur.get("base_url") or ""
-        key = key or cur.get("api_key") or ""
+        # ⚠️ Key 的来源要按"用户正在改的那套配置"取。
+        #
+        #    原来这里拿的是 engine_bridge.load_config()——
+        #    那是**旧的单套配置**，跟界面上多套列表不是一回事。
+        #
+        #    结果：用户在 Kimi 那套里填了 Key，点"查模型"
+        #    拿到的还是旧那套的 Key，当然对不上。
+        if not key:
+            base, key = _profile_creds(body.get("id") or "", base)
 
         ok, models, err = list_models(base, key)
         if not ok:
             return self._send(*_json({"ok": False, "error": err}))
 
+        # models 现在是 [(id, 显示名)]。
+        #
+        # 为什么分两份给前端：
+        #     官方返回的 id 是 deepseek-flash，
+        #     但 name 是 DeepSeek-V4.1-Flash。
+        #     下拉框要显示好看的那个，调接口要用难看的那个。
+        #     前端用 QComboBox 的 setItemData 把 id 挂在每一项上。
+        ids = [m[0] for m in models]
+        labels = [m[1] for m in models]
+
         return self._send(*_json({
             "ok": True,
-            "models": models,
+            "ids": ids,
+            "labels": labels,
+            # 老格式也留着：别的地方可能还在用
+            "models": ids,
             "default": pick_default(models),
         }))
 
@@ -998,7 +1097,7 @@ class Handler(BaseHTTPRequestHandler):
         如果没传 api_key（界面上留空表示"不改"），
         就保留原来的 key——不能让用户为了改个地址把 key 重打一遍。
         """
-        import engine_bridge
+        from core import engine_bridge
 
         cur = engine_bridge.load_config()
         base = (body.get("base_url") or "").strip()
@@ -1027,13 +1126,16 @@ class Handler(BaseHTTPRequestHandler):
             用户填完不知道自己填对没有。等派了一个活失败了才
             发现地址写错，那就太晚了。
         """
-        import engine_bridge
         from engine import test_connection
 
-        cur = engine_bridge.load_config()
-        base = (body.get("base_url") or cur.get("base_url") or "").strip()
-        model = (body.get("model") or cur.get("model") or "").strip()
-        key = (body.get("api_key") or cur.get("api_key") or "").strip()
+        base = (body.get("base_url") or "").strip()
+        model = (body.get("model") or "").strip()
+        key = (body.get("api_key") or "").strip()
+
+        # 同 _engine_models：Key 从"正在改的那套"取，不从旧的单套配置取。
+        if not key:
+            base2, key = _profile_creds(body.get("id") or "", base)
+            base = base or base2
 
         if not base or not model or not key:
             return {"ok": False, "error": "三样都得填：接口地址、Key、模型名"}
@@ -1047,7 +1149,7 @@ class Handler(BaseHTTPRequestHandler):
         ⚠️ 授权码不回传。
             传空表示"不改"——用户不想为了改个邮箱把授权码重打一遍。
         """
-        import guard
+        from guard import guard
 
         cur = guard.load_config()
         for k in ("email", "smtp_host", "smtp_user"):
@@ -1096,7 +1198,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         import time as _t
 
-        import guard
+        from guard import guard
 
         results = []
 
@@ -1205,12 +1307,12 @@ class Handler(BaseHTTPRequestHandler):
     # ── 权限 ──
     def _perms_get(self) -> dict:
         """列出每个窗口的权限。"""
-        import task_perms as tp
+        from guard import task_perms as tp
 
         cfg = tp.load()
         tasks = []
         try:
-            import bridge as _b
+            from core import bridge as _b
 
             for t in _b._read_tasks():
                 nm = t.get("id") or ""
@@ -1263,7 +1365,7 @@ class Handler(BaseHTTPRequestHandler):
             码绑的是"给『某个任务名』开『某个级别』"这一件事，
             不能拿去干别的，也不能换个任务名复用。
         """
-        import task_perms as tp
+        from guard import task_perms as tp
 
         name = (body.get("name") or "").strip()
         level = (body.get("level") or "").strip().lower()
@@ -1294,7 +1396,7 @@ class Handler(BaseHTTPRequestHandler):
         if widening:
             # 升权：必须有码
             try:
-                import guard
+                from guard import guard
             except ImportError:
                 return {"ok": False, "error": "guard 模块不可用，没法验证"}
 
@@ -1451,7 +1553,7 @@ class Handler(BaseHTTPRequestHandler):
     def _model_get(self):
         """当前任务端用的模型。设置页开的时候要看。"""
         try:
-            import tune_model
+            from tools import tune_model
 
             cur = tune_model.get_current()
             return self._send(*_json({
@@ -1550,7 +1652,7 @@ class Handler(BaseHTTPRequestHandler):
             #    而且只判了"有没有"，没判个数。
             #    现在交给 platform_utils，两个平台都能查。
             try:
-                import platform_utils as _pu
+                from tools import platform_utils as _pu
 
                 cnt = 1 if _pu.process_running("QQ") else 0
             except ImportError:
@@ -1656,7 +1758,7 @@ class Handler(BaseHTTPRequestHandler):
             #
             #    Linux 上这套东西根本不存在。与其"适配"，不如直接说清楚——
             #    一个在 Linux 上假装能重启 QQ 的按钮，比没有这个按钮更糟。
-            import platform_utils as _pu_restart
+            from tools import platform_utils as _pu_restart
 
             if not _pu_restart.IS_WINDOWS:
                 return {
@@ -1788,7 +1890,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     global _API_TOKEN
 
-    import security as _sec
+    from guard import security as _sec
 
     ap = argparse.ArgumentParser(description="桥的 HTTP 接口")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -1812,8 +1914,8 @@ def main() -> int:
     #     用户看到的是"被锁的活 运行中"——那条其实是另一条已取消的任务，
     #     但底下这条真卡死的在列表里，看着就是没跑完。
     try:
-        import bridge as _bridge
-        import recover as _recover
+        from core import bridge as _bridge
+        from core import recover as _recover
 
         _fixed = _recover.recover(
             workspaces=os.path.join(BRIDGE_DIR, "workspaces"),

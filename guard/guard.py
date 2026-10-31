@@ -396,7 +396,7 @@ def save_config(cfg: dict) -> None:
     # ⚠️ 原来直接调 icacls，在 Linux 上会 FileNotFoundError 被吞掉。
     #    交给 platform_utils 统一处理。
     try:
-        import platform_utils as _pu
+        from tools import platform_utils as _pu
 
         _pu.tighten_file(p)
     except ImportError:

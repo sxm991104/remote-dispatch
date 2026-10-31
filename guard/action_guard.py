@@ -569,7 +569,7 @@ def describe(command: str) -> list[dict]:
 
             r""m -rf /important      shell 拼成 rm，正则看到的是 r""m
             r''m -rf /important      同上
-            r\m -rf /important      反斜杠在 shell 里表转义，等价于 rm
+            r\\\\m -rf /important     反斜杠在 shell 里表转义，等价于 rm
 
         而 normalize_for_match 早就处理了这些（空引号、反斜杠），
         只是这里没调用它 —— uses_arbitrary_executor 调了，

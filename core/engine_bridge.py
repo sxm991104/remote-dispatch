@@ -156,7 +156,7 @@ def dispatch(task: str, task_id: str, workdir: str,
             "seconds": round(time.time() - t0, 1), "session_id": "",
         }
 
-    import bridge as _br  # 延迟导入，避免循环
+    from . import bridge as _br  # 延迟导入，避免循环
 
     last_beat = [0.0]
 

@@ -23,8 +23,8 @@ os.makedirs(os.environ["LOCALAPPDATA"], exist_ok=True)
 sys.path.insert(0, r"D:\Project\dsh-bridge-oss")
 sys.stdout.reconfigure(encoding="utf-8")
 
-import task_perms  # noqa: E402
-import guard  # noqa: E402
+from guard import task_perms  # noqa: E402
+from guard import guard  # noqa: E402
 
 # 打桩：不发真邮件，直接塞一个码
 _real_send = guard.send_code_email
@@ -110,7 +110,7 @@ print("\n" + "=" * 68)
 print("3. 带对码 → 生效")
 print("=" * 68)
 # 直接从 guard 的内部状态拿码（模拟用户从邮箱看到）
-import guard  # noqa: E402
+from guard import guard  # noqa: E402
 
 fp = guard._fingerprint("perm:任务B:full")
 p = guard._state.pending.get(fp)

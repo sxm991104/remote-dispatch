@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import security  # noqa: E402
+from guard import security  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════

@@ -174,7 +174,7 @@ def main() -> int:
     # ── 4. 文件锁（这是 Linux 上会崩的那块）──
     print("\n四、文件锁（跨平台）")
     try:
-        import bridge
+        from core import bridge
 
         lock_path = os.path.join(_TMP, "lock_test")
         with bridge._TaskLock(lock_path):
@@ -186,7 +186,7 @@ def main() -> int:
     # ── 5. 权限层 ──
     print("\n五、权限层")
     try:
-        import task_perms
+        from guard import task_perms
 
         task_perms.set_level("冒烟", "workspace")
         ok("能设权限", task_perms.get_level("冒烟") == "workspace")
@@ -200,7 +200,7 @@ def main() -> int:
     # ── 6. 桥的 dispatch ──
     print("\n六、桥 dispatch")
     try:
-        import bridge
+        from core import bridge
 
         rec = bridge.cmd_dispatch("冒烟任务", task_id="smoke-1")
         ok("dispatch 成功",

@@ -308,7 +308,7 @@ def test_concurrent_task_writes() -> None:
         桥的 _write_tasks 有重试（50 次，约 5 秒），
         所以要用它来测才有意义。
     """
-    import bridge
+    from core import bridge
 
     with tempfile.TemporaryDirectory() as d:
         old = bridge.TASKS
@@ -353,7 +353,7 @@ def test_concurrent_task_writes() -> None:
 
 def test_write_tasks_retries_on_permission_error() -> None:
     """os.replace 报 PermissionError 时要重试，不能直接放弃。"""
-    import bridge
+    from core import bridge
 
     with tempfile.TemporaryDirectory() as d:
         old_tasks = bridge.TASKS

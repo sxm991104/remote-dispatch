@@ -13,7 +13,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import outputs  # noqa: E402
+from core import outputs  # noqa: E402
 
 
 @pytest.fixture

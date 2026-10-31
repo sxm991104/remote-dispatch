@@ -79,7 +79,7 @@ def run(task: str, workdir: str, llm: LLM, max_steps: int = 40,
     #          "默认最小 + 按需提权"的差别在于：
     #          攻击者要造成伤害，得先让用户同意提权，而提权看得见。
     try:
-        import task_perms as _tp
+        from guard import task_perms as _tp
 
         _lv = _tp.get_level(task_name) if task_name else "workspace"
         tools.set_level(_lv)
@@ -221,7 +221,7 @@ def _count_block(what: str, reason: str) -> None:
         那说明前台已经被绕过去了——这时候按次数算才对。
     """
     try:
-        import guard_gate as _g
+        from guard import guard_gate as _g
 
         _g.intercept(what, reason)
     except Exception:  # noqa: BLE001
@@ -241,7 +241,7 @@ def _check_action(name: str, arguments: str) -> str | None:
         拦截应该造成"模型知道被拦了"，不是"任务挂了"。
     """
     try:
-        import action_guard as ag
+        from guard import action_guard as ag
     except ImportError:
         return None
 
@@ -269,7 +269,7 @@ def _check_action(name: str, arguments: str) -> str | None:
         #    他不是"漏了几个词"，是"词表管不住图灵完备的执行口"。
         #    所以这一层质疑的不是命令内容，是**入口的表达能力**。
         #    表达能力是有限的——就那几类解释器。
-        import task_perms as _tp
+        from guard import task_perms as _tp
 
         if _tp_level() != "full":
             is_exec, label = ag.uses_arbitrary_executor(cmd)
@@ -330,7 +330,7 @@ def _check_action(name: str, arguments: str) -> str | None:
             #        如果真的在同一个任务里反复重试，
             #        那说明前台已经被绕过去了——这时候按次数算才是对的。
             try:
-                import guard_gate as _g
+                from guard import guard_gate as _g
 
                 hit = _g.intercept(cmd, reason)
                 count = hit.get("count", 0)
@@ -407,7 +407,7 @@ def _check_action(name: str, arguments: str) -> str | None:
             #    谎报比不做更糟：用户会以为自己看到的是最新状态。
             #
             #    现在如实说：没写，问你。
-            import task_perms as _tp
+            from guard import task_perms as _tp
 
             if _tp_level() == "workspace":
                 _count_block(path, "写工作区外的文件")

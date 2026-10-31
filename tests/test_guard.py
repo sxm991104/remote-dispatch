@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import guard  # noqa: E402
+from guard import guard  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════
@@ -46,7 +46,7 @@ def _reset() -> None:
     #
     #    测试之间必须互不影响。
     try:
-        import count_store
+        from guard import count_store
 
         count_store.reset_count()
         d = count_store.load()
@@ -441,7 +441,7 @@ def test_dispatch_blocked_by_fence() -> None:
         症状：发了验证码（全站该锁死），然后从别的路径派了一条，
               created 和 started 只差 1 秒——**1 秒后就跑起来了**。
     """
-    import bridge
+    from core import bridge
 
     # 先造围栏
     danger = "删掉生产环境用户表"
@@ -457,7 +457,7 @@ def test_dispatch_blocked_by_fence() -> None:
 
 def test_dispatch_blocks_normal_task_too() -> None:
     """★ 普通任务也拦——围栏是全局的。"""
-    import bridge
+    from core import bridge
 
     _put("删库")
 
@@ -468,7 +468,7 @@ def test_dispatch_blocks_normal_task_too() -> None:
 
 def test_blocked_task_not_written() -> None:
     """被拦的任务不能写进任务库。"""
-    import bridge
+    from core import bridge
 
     _put("删库")
     before = len(bridge._read_tasks())
@@ -482,7 +482,7 @@ def test_blocked_task_not_written() -> None:
 
 def test_dispatch_works_after_unlock() -> None:
     """验证通过后，dispatch 恢复正常。"""
-    import bridge
+    from core import bridge
 
     danger = "删库"
     _put(danger, "888888")

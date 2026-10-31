@@ -41,9 +41,26 @@ import threading
 import time
 from datetime import datetime
 
-from safe_path import safe_join, safe_name  # noqa: E402
+# ⚠️ 把自己所在的仓库根目录塞进 sys.path。
+#
+#    bridge.py 是被 `python bridge.py dispatch ...` 这样当脚本调的，
+#    而它现在住在 core/ 里——脚本模式下 sys.path[0] 是 core/，
+#    找不到 guard 这个包。
+#
+#    这里主动补上。放在 import 项目内模块之前。
+_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_CORE_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 
-BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+from guard.safe_path import safe_join, safe_name  # noqa: E402
+
+# 数据文件放**仓库根**，不放 core/。
+#
+# 老用户的 tasks.jsonl / results.jsonl 一直在根目录。
+# 分成包之后如果按 __file__ 算，会变成 core/tasks.jsonl——
+# 等于升级一次就把历史任务全"丢了"。
+BRIDGE_DIR = _ROOT_DIR
 TASKS = os.path.join(BRIDGE_DIR, "tasks.jsonl")
 RESULTS = os.path.join(BRIDGE_DIR, "results.jsonl")
 SESSION_FILE = os.path.join(BRIDGE_DIR, ".session_id")
@@ -159,7 +176,7 @@ def _task_session_path(task_id: str) -> str:
     ⚠️ task_id 是用户能给的东西，必须校验。
         实测过：任务名写 "../PWNED" 能逃到桥目录外面去。
     """
-    from safe_path import safe_join
+    from guard.safe_path import safe_join
 
     d = safe_join(_sessions_dir(), task_id)
     return d + ".session"
@@ -831,7 +848,7 @@ def _invoke_engine(task: str, timeout: int, task_id: str = "") -> dict | None:
     配置好之后，DSH 就完全用不上了——不用装 Node，不用装 DSH。
     """
     try:
-        import engine_bridge
+        from . import engine_bridge
     except Exception:  # noqa: BLE001
         return None
 
@@ -1255,7 +1272,7 @@ def cmd_dispatch(task_text: str, task_id: str = "", profile: str = "") -> dict:
     #    计数按**当天总次数**算，不按"同一件事"。
     #    因为攻击者会不停换花样，每种只试一次。
     try:
-        import guard_gate as _gate
+        from guard import guard_gate as _gate
 
         _verdict = _gate.gate(task_text or "")
         if not _verdict.get("allow"):
@@ -1450,7 +1467,7 @@ def notify_outbox(task_id: str, rec: dict, task_text: str = "") -> None:
         skipped: list[dict] = []
         if st == "ok":
             try:
-                import outputs as _outputs
+                from . import outputs as _outputs
 
                 batch = _outputs.collect(_task_workdir(task_id))
                 files = batch.get("files") or []
@@ -1789,7 +1806,7 @@ def main() -> int:
     if args.cmd == "guard":
         sys.path.insert(0, BRIDGE_DIR)
         try:
-            import guard_git
+            from guard import guard_git
             if args.path:
                 rec = guard_git.apply_guard(args.path) if args.apply else guard_git.check(args.path)
                 print(json.dumps(rec, ensure_ascii=False))

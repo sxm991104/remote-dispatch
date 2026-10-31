@@ -245,7 +245,7 @@ def _tighten(path: str) -> None:
         Linux    chmod 600
     """
     try:
-        import platform_utils as _pu
+        from tools import platform_utils as _pu
 
         _pu.tighten_file(path)
     except ImportError:

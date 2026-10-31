@@ -29,6 +29,19 @@ import threading
 import urllib.error
 import urllib.request
 
+# ⚠️ 把自己所在的仓库根目录塞进 sys.path。
+#
+#    这个文件现在住在 desktop/ 里，而它要 import 的模块
+#    （tools.deps、guard.* 等）在仓库根下面。
+#
+#    从 desktop/app.py 启动时，sys.path[0] 是 desktop/，
+#    找不到 tools 这个包——环境页因此一片空白。
+#
+#    实测：加了这一行，环境页才正常显示。
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -46,6 +59,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QSizePolicy,
     QStackedWidget,
     QTextEdit,
@@ -1209,57 +1223,19 @@ class MainWindow(QMainWindow):
         head.addWidget(sub)
         lay.addLayout(head)
 
-        card = QFrame()
-        card.setObjectName("card")
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(20, 18, 20, 18)
-        cl.setSpacing(10)
+        # ⚠️ 派活输入框去掉了。
+        #
+        #    派活走飞书 / QQ 那边——用户直接跟丫头说。
+        #    桌面上再放一个派活框，等于两条路都能派活，
+        #    出了问题不知道是谁派的。
 
-        l1 = QLabel("要做什么")
-        l1.setFont(font(11))
-        l1.setStyleSheet(f"color:{C_DIM2};")
-        cl.addWidget(l1)
-
-        self.ed_task = QPlainTextEdit()
-        self.ed_task.setPlaceholderText("比如：把登录页的按钮改大一点，顺便调下颜色")
-        self.ed_task.setFixedHeight(74)
-        cl.addWidget(self.ed_task)
-
-        row = QHBoxLayout()
-        row.setSpacing(12)
-        self.ed_name = QLineEdit()
-        self.ed_name.setPlaceholderText("叫它什么？比如：登录页")
-        row.addWidget(self.ed_name, 1)
-
-        self.btn_send = QPushButton("派出去")
-        self.btn_send.setObjectName("primary")
-        self.btn_send.setCursor(Qt.PointingHandCursor)
-        self.btn_send.clicked.connect(self._dispatch)
-        row.addWidget(self.btn_send)
-        cl.addLayout(row)
-
-        tip = QLabel("起个短的好记的名字。以后想知道进度就说这个名字。")
-        tip.setFont(font(10.5))
-        tip.setStyleSheet(f"color:{C_DIM2};")
-        cl.addWidget(tip)
-
-        lay.addWidget(card)
-
-        chips = QHBoxLayout()
-        chips.setSpacing(6)
-        self.chip_btns = []
-        for key, text in (("all", "全部"), ("running", "运行中"),
-                          ("ok", "已完成"), ("bad", "失败")):
-            c = QPushButton(text)
-            c.setObjectName("chip")
-            c.setCheckable(True)
-            c.setCursor(Qt.PointingHandCursor)
-            c.clicked.connect(lambda _=False, k=key: self._set_filter(k))
-            chips.addWidget(c)
-            self.chip_btns.append((key, c))
-        self.chip_btns[0][1].setChecked(True)
-        chips.addStretch()
-        lay.addLayout(chips)
+        # ⚠️ 筛选按钮挪到每个 tab 里面了。
+        #
+        #    放在这里的话，看起来像"筛所有模型"——
+        #    但它实际是"筛当前这个模型里的任务"。
+        #    层级放错，用户会以为切 tab 之后筛选还在管全局。
+        #
+        #    现在：先在 tab 里选模型，再在下面筛状态。
 
         # ⚠️ 这里不能加 addStretch()。
         #
@@ -1271,19 +1247,41 @@ class MainWindow(QMainWindow):
         #
         #    实测：光看代码看不出问题，因为它不是"多画了一次"，
         #    而是布局引擎在反复迭代。
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        holder = QWidget()
-        self.list_lay = QVBoxLayout(holder)
-        self.list_lay.setContentsMargins(0, 0, 8, 0)
-        self.list_lay.setSpacing(8)
-        # 不用 SetMinAndMaxSize：那会让每加一个控件都把整棵树重新算一遍。
-        # 一百个任务行 = 一百次全树重算，实测三千多次 PaletteChange、
-        # 一千多次 Resize，屏幕上就是持续闪烁。
-        # 让 QScrollArea 自己按内容高度调整就够了。
-        self.scroll.setWidget(holder)
-        lay.addWidget(self.scroll, 1)
+        # ⚠️ 这里从"一个大滚动列表"改成了"每个模型一个 tab"。
+        #
+        #    原来：所有任务塞进一个 QScrollArea，平铺。
+        #    现在：模型做 tab，每个 tab 里一个滚动区。
+        #
+        #    这样一屏只看一个模型的任务，不挤；
+        #    要换模型点 tab，不用往下翻。
+
+        self.model_tabs = QTabWidget()
+        self.model_tabs.setObjectName("modeltabs")
+        self.model_tabs.setStyleSheet(
+            "QTabWidget::pane {"
+            f" border:none; background:transparent;"
+            "}"
+            "QTabBar::tab {"
+            f" background:transparent; color:{C_DIM};"
+            " padding:7px 16px; margin-right:4px;"
+            " border-bottom:2px solid transparent;"
+            "}"
+            "QTabBar::tab:hover {"
+            f" color:{C_TEXT2};"
+            "}"
+            "QTabBar::tab:selected {"
+            f" color:{C_TEXT}; border-bottom:2px solid {C_ACCENT};"
+            "}"
+        )
+
+        # 每个 tab 的内容是一个滚动区，装这个模型名下的任务行
+        self.task_tab_host = QWidget()
+        self.task_tab_host_lay = QVBoxLayout(self.task_tab_host)
+        self.task_tab_host_lay.setContentsMargins(0, 0, 0, 0)
+        self.task_tab_host_lay.setSpacing(8)
+
+        lay.addWidget(self.model_tabs, 1)
+
 
         return page
 
@@ -1401,7 +1399,7 @@ class MainWindow(QMainWindow):
     def _refresh_deps(self) -> None:
         """重新查一遍，重画列表。"""
         try:
-            import deps as _deps
+            from tools import deps as _deps
         except ImportError:
             self.lbl_env.setText("读不到 deps 模块。检查一下 deps.py 在不在。")
             return
@@ -1555,7 +1553,7 @@ class MainWindow(QMainWindow):
     def _pick_dep_path(self, key: str) -> None:
         """让用户手动指一个目录。"""
         try:
-            import deps as _deps
+            from tools import deps as _deps
         except ImportError:
             return
 
@@ -1577,7 +1575,7 @@ class MainWindow(QMainWindow):
         if self._installing:
             return
         try:
-            import deps as _deps
+            from tools import deps as _deps
         except ImportError:
             return
 
@@ -1590,7 +1588,7 @@ class MainWindow(QMainWindow):
     def _run_install(self, pkgs: list[str]) -> None:
         """真正去装。"""
         try:
-            import deps as _deps
+            from tools import deps as _deps
         except ImportError:
             return
 
@@ -1651,16 +1649,39 @@ class MainWindow(QMainWindow):
         lay.addWidget(h)
         lay.addWidget(sub)
 
-        # ⚠️ 这里从"三样都开"改成了"按需开"。
+        # ⚠️ 这三样拆开是为了省内存：
         #
-        #    原来点一次启动，QQ 和飞书一起连上：
         #        QQ   → 拉 QQ 客户端（几百兆）
         #        飞书 → 只是网络连接（几十兆）
-        #    只用飞书的人白背着 QQ，低配机器直接卡。
+        #        任务端 → 跟通道无关，自己一份
         #
-        #    现在两条通道各一个开关，没点的不启动。
-        #    任务端跟通道无关，单独一个开关。
+        #    只用飞书的人不该白背着 QQ。
+        #
+        # 布局用 tab 而不是三张卡片竖排：
+        #    竖排时一屏挤三个，每个都被压扁，说明文字挤成一团。
+        #    tab 一次只看一个，空间够，读得清。
         self.svc_cards = {}
+
+        self.svc_tabs = QTabWidget()
+        self.svc_tabs.setObjectName("svctabs")
+        self.svc_tabs.setStyleSheet(
+            "QTabWidget::pane {"
+            f" border:1px solid {C_LINE}; border-radius:10px;"
+            f" background:{C_SURFACE}; top:-1px;"
+            "}"
+            "QTabBar::tab {"
+            f" background:transparent; color:{C_DIM};"
+            " padding:8px 18px; margin-right:4px;"
+            f" border-bottom:2px solid transparent;"
+            "}"
+            "QTabBar::tab:hover {"
+            f" color:{C_TEXT2};"
+            "}"
+            "QTabBar::tab:selected {"
+            f" color:{C_TEXT}; border-bottom:2px solid {C_ACCENT};"
+            "}"
+        )
+
         for key, title, desc in (
             ("qq", "QQ 通道", "要拉 QQ 客户端，比较占内存。不用 QQ 就关掉"),
             ("feishu", "飞书通道", "纯网络连接，很轻，几秒钟就能开"),
@@ -1669,7 +1690,16 @@ class MainWindow(QMainWindow):
             card = ServiceCard(key, title, desc)
             card.action_clicked.connect(self._svc_action)
             self.svc_cards[key] = card
-            lay.addWidget(card)
+
+            # 每张卡外面包一层留边距——不然贴着 tab 边很难看
+            wrap = QWidget()
+            wl = QVBoxLayout(wrap)
+            wl.setContentsMargins(16, 16, 16, 16)
+            wl.addWidget(card)
+            wl.addStretch()
+            self.svc_tabs.addTab(wrap, title)
+
+        lay.addWidget(self.svc_tabs, 1)
 
         # 一行提示：说明为什么拆开
         hint = QLabel(
@@ -1679,6 +1709,13 @@ class MainWindow(QMainWindow):
         hint.setStyleSheet(f"color:{C_DIM2};")
         hint.setWordWrap(True)
         lay.addWidget(hint)
+
+        # ⚠️ 模型分组搬到「任务」页了。
+        #
+        #    这里原来也放了一份，等于同一个东西画两遍——
+        #    而且服务页的职责是"开关服务"，不是"看模型在跑什么"。
+        #
+        #    现在：服务页只管三件事启停，模型状态去任务页看。
 
         lay.addStretch()
         return page
@@ -1747,7 +1784,7 @@ class MainWindow(QMainWindow):
         # 新增按钮
         addrow = QHBoxLayout()
         addrow.setSpacing(8)
-        self.btn_add_profile = QPushButton("＋ 新增一套")
+        self.btn_add_profile = QPushButton("＋ 新增模型")
         self.btn_add_profile.setObjectName("ghost")
         self.btn_add_profile.setCursor(Qt.PointingHandCursor)
         self.btn_add_profile.clicked.connect(self._add_profile)
@@ -1782,6 +1819,12 @@ class MainWindow(QMainWindow):
 
         self.ed_base = field2("接口地址", "https://api.openai.com")
         self.ed_key = field2("API Key", "留空表示不改", secret=True)
+        # 填完 Key 自动拉一次模型——不用再点"测试连接"。
+        # 这是给"新增模型"用的：先输了地址，再输 Key，
+        # 输完 Key 的那一刻模型列表就该出来。
+        self.ed_key.editingFinished.connect(
+            lambda: self._fetch_models(silent=True)
+        )
 
         self.lbl_key_state = QLabel("")
         self.lbl_key_state.setFont(font(10.5))
@@ -1793,40 +1836,65 @@ class MainWindow(QMainWindow):
         lbl_model.setStyleSheet(f"color:{C_DIM2};")
         cl.addWidget(lbl_model)
 
+        # ⚠️ 不可编辑——这是"下拉框"，不是"输入框"。
+        #
+        #    setEditable(True) 那个版本长得跟输入框一模一样，
+        #    用户看不出这里有列表可选，只能盲打（打错一个字母就 404）。
+        #
+        #    现在：点一下就是列表，选项是接口返回的真实模型。
+        #    真要填列表里没有的（自建 / 代理），点最后一项「手动输入…」。
         self.cmb_engine_model = QComboBox()
-        self.cmb_engine_model.setEditable(True)
+        self.cmb_engine_model.setEditable(False)
         self.cmb_engine_model.setMinimumHeight(36)
-        self.cmb_engine_model.lineEdit().setPlaceholderText("选一个，或者直接输入")
+        self.cmb_engine_model.setCursor(Qt.PointingHandCursor)
         cl.addWidget(self.cmb_engine_model)
 
-        # 快速填
-        quick = QHBoxLayout()
+        # 快速填：只在「新增模型」时出现。
+        #
+        # 为什么点已有模型时不显示：
+        #     那套的地址和模型早就填好了，
+        #     旁边还摆一排"一键填某家"的按钮，纯属干扰。
+        self.quick_row_host = QWidget()
+        quick = QHBoxLayout(self.quick_row_host)
+        quick.setContentsMargins(0, 0, 0, 0)
         quick.setSpacing(8)
         ql = QLabel("快速填：")
         ql.setFont(font(10.5))
         ql.setStyleSheet(f"color:{C_DIM2};")
         quick.addWidget(ql)
+        # ⚠️ 这里的模型名只是"先填个最常见的"，不一定是你账号下的真实名字。
+        #
+        #    以前写的是 deepseek-chat——那是旧名字，
+        #    DeepSeek 现在返回的是 deepseek-flash / deepseek-v4-pro。
+        #    点了快速填之后名字对不上，还得手动改。
+        #
+        #    所以：快速填只负责把**地址**填对，模型名那个下拉框
+        #    交给 _fetch_models 拉真实列表（界面一打开就自动拉）。
+        #    填进去的模型名只是个占位，列表一到就会被替换掉。
         for name, base, model in (
-            ("DeepSeek", "https://api.deepseek.com", "deepseek-chat"),
-            ("OpenAI", "https://api.openai.com", "gpt-4o"),
-            ("Kimi", "https://api.moonshot.cn", "kimi-k2.6"),
-            ("通义", "https://dashscope.aliyuncs.com/compatible-mode", "qwen-plus"),
-            ("硅基流动", "https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3"),
+            ("DeepSeek", "https://api.deepseek.com", ""),
+            ("OpenAI", "https://api.openai.com/v1", ""),
+            ("Kimi", "https://api.moonshot.cn", ""),
+            ("通义", "https://dashscope.aliyuncs.com/compatible-mode/v1", ""),
+            ("硅基流动", "https://api.siliconflow.cn/v1", ""),
         ):
             b = QPushButton(name)
             b.setObjectName("ghost")
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(
-                lambda _=False, u=base, mo=model: (
-                    self.ed_base.setText(u), self._set_model_text(mo)
+                lambda _=False, u=base: (
+                    self.ed_base.setText(u),
+                    self._fetch_models(silent=True),
                 )
             )
             quick.addWidget(b)
         quick.addStretch()
-        cl.addLayout(quick)
+        cl.addWidget(self.quick_row_host)
 
-        # 操作按钮
-        arow2 = QHBoxLayout()
+        # 操作按钮：同样只在「新增模型」时出现。
+        self.action_row_host = QWidget()
+        arow2 = QHBoxLayout(self.action_row_host)
+        arow2.setContentsMargins(0, 0, 0, 0)
         arow2.setSpacing(8)
 
         b_test = QPushButton("测试连接")
@@ -1841,18 +1909,18 @@ class MainWindow(QMainWindow):
         b_save.clicked.connect(self._save_engine)
         arow2.addWidget(b_save)
 
+        # 「删除这套」拿掉了——上面每一行已经有「删」按钮，
+        # 这里再放一个，等于同一个动作两个入口。
+        # 保留一个属性名，别的地方还在用（禁用/启用的状态控制）。
         self.btn_del_profile = QPushButton("删除这套")
-        self.btn_del_profile.setObjectName("ghost")
-        self.btn_del_profile.setCursor(Qt.PointingHandCursor)
-        self.btn_del_profile.clicked.connect(self._delete_profile)
-        arow2.addWidget(self.btn_del_profile)
+        self.btn_del_profile.hide()
 
         self.lbl_engine = QLabel("")
         self.lbl_engine.setFont(font(10.5))
         self.lbl_engine.setStyleSheet(f"color:{C_DIM2};")
         self.lbl_engine.setWordWrap(True)
         arow2.addWidget(self.lbl_engine, 1)
-        cl.addLayout(arow2)
+        cl.addWidget(self.action_row_host)
 
         self.lbl_engine_now = QLabel("")
         self.lbl_engine_now.setFont(font(10.5))
@@ -2240,6 +2308,9 @@ class MainWindow(QMainWindow):
     def refresh(self) -> None:
         self.api.get("/api/tasks")
         self.api.get("/api/services")
+        # 模型配置也每轮拉一次——读的是本地 json，很便宜。
+        # 用户新加一套模型不用重启界面，任务页的分组就跟着变了。
+        self._load_profiles()
 
     def _on_qq_stopped(self) -> None:
         """用户放弃扫码，QQ 已经停掉。界面回到干净状态。"""
@@ -2292,112 +2363,193 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def _render_tasks(self) -> None:
-        """刷新任务列表。
+        """每个模型一个 tab，tab 下面列它名下的任务。
 
-        ⚠️ 这里的关键是**不要重建**。
-            一开始是每次把上百个 TaskRow 全销毁再全新建一遍。
-            实测：50 行 135 毫秒，100 行 435 毫秒。
-            列表每 3 秒刷一次，等于界面有一大半时间在重建控件——
-            屏幕上一直闪，而且点什么都没反应（主线程被占着）。
-
-            现在分两种情况：
-                · 行数和顺序都没变 → 原地更新每行的文字，开销接近零
-                · 变了（新增任务、筛选、第一次）→ 才重建
+        ⚠️ 不重建已经存在的 tab。
+            列表每 3 秒刷一次，重建会让屏幕闪、主线程被占。
+            所以先算指纹：哪些模型、每个模型下哪些任务。
+            指纹没变 → 只更新每行文字。
+            指纹变了 → 才重建 tab。
         """
-        shown = self.tasks
-        if self.filter == "running":
-            shown = [t for t in self.tasks if t.get("status") == "running"]
-        elif self.filter == "ok":
-            shown = [t for t in self.tasks if t.get("status") == "ok"]
-        elif self.filter == "bad":
-            shown = [t for t in self.tasks if t.get("status") in ("error", "timeout")]
-
-        limit = self._list_limit
-        shown = shown[:limit]
-        names = [t.get("name") for t in shown]
-
-        # 结构没变：原地更新
-        if getattr(self, "_rows_names", None) == names and self.list_lay.count():
-            for i, t in enumerate(shown):
-                item = self.list_lay.itemAt(i)
-                row = item.widget() if item else None
-                if isinstance(row, TaskRow):
-                    row.update_data(t)
+        tabs = getattr(self, "model_tabs", None)
+        if tabs is None:
             return
 
-        # 结构变了：重建
-        while self.list_lay.count():
-            it = self.list_lay.takeAt(0)
-            w = it.widget()
+        profs = getattr(self, "_profiles", None) or []
+        tasks = getattr(self, "tasks", None) or []
+
+        # 筛选
+        shown = tasks
+        if self.filter == "running":
+            shown = [t for t in tasks if t.get("status") == "running"]
+        elif self.filter == "ok":
+            shown = [t for t in tasks if t.get("status") == "ok"]
+        elif self.filter == "bad":
+            shown = [t for t in tasks if t.get("status") in ("error", "timeout")]
+
+        groups: dict = {}
+        for t in shown:
+            groups.setdefault(t.get("profile") or "", []).append(t)
+
+        order = {"running": 0, "pending": 1, "queued": 1}
+        for k in groups:
+            groups[k] = sorted(
+                groups[k], key=lambda t: order.get(t.get("status"), 2)
+            )
+
+        # 没有配置时给一句提示
+        if not profs:
+            if getattr(self, "_render_sig", None) == ("noprof",):
+                return
+            self._clear_tabs()
+            lb = QLabel(
+                "还没有配置模型。去「设置」里加一套，任务才知道交给谁跑。"
+            )
+            lb.setFont(font(11))
+            lb.setWordWrap(True)
+            lb.setStyleSheet(f"color:{C_DIM2}; padding:16px 0;")
+            self.task_tab_host.layout().addWidget(lb)
+            self._render_sig = ("noprof",)
+            return
+
+        # ── 指纹 ──
+        sig = tuple(
+            (p.get("id") or "",
+             tuple(t.get("name") for t in groups.get(p.get("id") or "", [])[:self._list_limit]))
+            for p in profs
+        )
+
+        if getattr(self, "_render_sig", None) == sig:
+            # 结构没变：只更新每行文字和状态
+            for p in profs:
+                pid = p.get("id") or ""
+                block = getattr(self, "_task_blocks", {}).get(pid)
+                if not block:
+                    continue
+                items = groups.get(pid, [])[:self._list_limit]
+                for t, row in zip(items, block["rows"]):
+                    row.update_data(t)
+                block["stat"].setText(self._model_stat_text(items, p))
+                block["dot"].setColor(C_OK if items else C_DIM2)
+            return
+
+        # ── 结构变了：重建 ──
+        self._clear_tabs()
+        self._task_blocks = {}
+        # 筛选按钮跟着 tab 一起重建，旧的要清掉，
+        # 不然 _set_filter 会去点已经删掉的按钮。
+        self.chip_btns = []
+        lay = self.task_tab_host.layout()
+
+        for p in profs:
+            pid = p.get("id") or ""
+            items = groups.get(pid, [])[:self._list_limit]
+
+            page = QWidget()
+            pl = QVBoxLayout(page)
+            pl.setContentsMargins(4, 10, 4, 4)
+            pl.setSpacing(10)
+
+            # ── 筛选条（只筛这个模型的任务） ──
+            chips = QHBoxLayout()
+            chips.setSpacing(6)
+            for ckey, ctext in (("all", "全部"), ("running", "运行中"),
+                                ("ok", "已完成"), ("bad", "失败")):
+                c = QPushButton(ctext)
+                c.setObjectName("chip")
+                c.setCheckable(True)
+                c.setChecked(ckey == self.filter)
+                c.setCursor(Qt.PointingHandCursor)
+                c.clicked.connect(
+                    lambda _=False, k=ckey: self._set_filter(k)
+                )
+                chips.addWidget(c)
+                self.chip_btns.append((ckey, c))
+            chips.addStretch()
+            pl.addLayout(chips)
+
+            # ── 状态行 ──
+            head = QHBoxLayout()
+            head.setSpacing(8)
+
+            dot = GlowDot(C_OK if items else C_DIM2, 7)
+            head.addWidget(dot, 0, Qt.AlignVCenter)
+
+            stat = QLabel(self._model_stat_text(items, p))
+            stat.setFont(font(11))
+            stat.setStyleSheet(f"color:{C_DIM};")
+            head.addWidget(stat)
+            head.addStretch()
+            pl.addLayout(head)
+
+            # ── 任务行 ──
+            rows = []
+            if items:
+                for t in items:
+                    row = TaskRow(t)
+                    row.clicked.connect(self._open_task)
+                    pl.addWidget(row)
+                    rows.append(row)
+
+            pl.addStretch()
+
+            # 每套模型一个 tab。名字用配置里的 name。
+            idx = self.model_tabs.addTab(page, p.get("name") or "未命名")
+            self._task_blocks[pid] = {
+                "rows": rows, "stat": stat, "dot": dot, "index": idx,
+            }
+
+        self._render_sig = sig
+
+    def _clear_tabs(self) -> None:
+        """清空所有 tab。"""
+        tabs = getattr(self, "model_tabs", None)
+        if tabs is None:
+            return
+        while tabs.count():
+            w = tabs.widget(0)
+            tabs.removeTab(0)
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
 
-        self._rows_names = names
+    def _model_stat_text(self, items: list, prof: dict) -> str:
+        """tab 里那行状态文字。"""
+        if not items:
+            return "还没有任务"
+        running = sum(1 for t in items if t.get("status") == "running")
+        queued = sum(1 for t in items if t.get("status") in ("pending", "queued"))
+        conc = prof.get("concurrency") or 1
+        bits = [f"{running}/{conc} 在跑"]
+        if queued:
+            bits.append(f"{queued} 排队")
+        return "  ·  ".join(bits)
 
-        holder = self.list_lay.parentWidget()
-        if holder is not None:
-            holder.setUpdatesEnabled(False)
-
-        if not shown:
-            lb = QLabel("这里还没有任务")
-            lb.setFont(font(12.5))
-            lb.setStyleSheet(f"color:{C_DIM2};")
-            lb.setAlignment(Qt.AlignCenter)
-            self.list_lay.addWidget(lb)
-        else:
-            for t in shown:
-                row = TaskRow(t)
-                row.clicked.connect(self._open_task)
-                self.list_lay.addWidget(row)
-
-        total = len([x for x in self.tasks]) if self.filter == "all" else len(
-            [x for x in self.tasks if (
-                x.get("status") == self.filter
-                or (self.filter == "bad" and x.get("status") in ("error", "timeout"))
-            )]
-        )
-        if total > limit:
-            more = QPushButton(f"还有 {total - limit} 条，显示更多")
-            more.setObjectName("ghost")
-            more.setCursor(Qt.PointingHandCursor)
-
-            def show_more():
-                self._list_limit = min(self._list_limit + 50, len(self.tasks))
-                self._rows_names = None
-                self._render_tasks()
-
-            more.clicked.connect(show_more)
-            self.list_lay.addWidget(more)
-
-        if holder is not None:
-            holder.setUpdatesEnabled(True)
+    def _model_stat_text(self, items: list, prof: dict) -> str:
+        """模型卡片标题右边那串状态。"""
+        running = sum(1 for t in items if t.get("status") == "running")
+        queued = sum(1 for t in items if t.get("status") in ("pending", "queued"))
+        conc = prof.get("concurrency") or 1
+        bits = [f"{running}/{conc} 在跑"]
+        if queued:
+            bits.append(f"{queued} 排队")
+        if not items:
+            bits = ["还没有任务"]
+        return "  ·  ".join(bits)
 
     def _open_task(self, name: str) -> None:
         t = next((x for x in self.tasks if x.get("name") == name), None)
         if t:
             DetailDialog(t, self.api, self).exec()
 
-    def _dispatch(self) -> None:
-        task = self.ed_task.toPlainText().strip()
-        name = self.ed_name.text().strip()
-        if not task:
-            QMessageBox.information(self, "还差一步", "先说要做什么。")
-            return
-        if not name:
-            QMessageBox.information(self, "还差一步", "给它起个名字，方便以后找。")
-            return
-        self.btn_send.setEnabled(False)
-        self.btn_send.setText("派发中…")
-        self.api.post("/api/dispatch", {"task": task, "name": name})
-
-        def restore():
-            self.btn_send.setEnabled(True)
-            self.btn_send.setText("派出去")
-            self.ed_task.clear()
-            self.ed_name.clear()
-
-        QTimer.singleShot(1200, restore)
+    # ⚠️ 桌面上不再直接派活。
+    #
+    #    原来这里有个 _dispatch，把输入框里的内容发给 /api/dispatch。
+    #    现在派活只走飞书 / QQ——用户直接跟丫头说。
+    #
+    #    为什么去掉桌面这条路：
+    #        两条路都能派活，出了问题不知道是谁派的，
+    #        也不知道该在哪边看回执。
 
     def _svc_action(self, key: str, action: str) -> None:
         """启动或重启一个服务。
@@ -2540,14 +2692,38 @@ class MainWindow(QMainWindow):
             self._active_pid = data.get("active") or ""
             self._render_profiles()
 
-            # 当前那套填进编辑区
-            cur = next(
-                (x for x in self._profiles if x["id"] == self._active_pid),
-                self._profiles[0] if self._profiles else None,
+            # ⚠️ 只在**第一次**才把某一套填进编辑区。
+            #
+            #    原来这里有段"永远填当前那套"的逻辑，
+            #    而整个列表每 3 秒刷新一次——
+            #    结果是用户点哪套，两秒后就被拽回去，
+            #    根本没法改另一套。
+            #
+            #    现在：用户点过就听用户的，不再自动改。
+            #    用户删掉选中的那套时，才重新挑一个。
+            # ⚠️ 正在新增的时候，**什么都别填**。
+            #
+            #    用户点了「＋ 新增模型」，界面清空成空白表单，
+            #    _selected_pid 也清成 ""。
+            #
+            #    而这一段是每 3 秒跑一次的刷新逻辑：
+            #        发现"选中的那套"不存在 → 以为被删了 → 挑第一套填进去
+            #    于是用户填到一半的空白表单，两秒后被第一套覆盖了。
+            #
+            #    现在：新增模式优先，刷新不碰编辑区。
+            if getattr(self, "_is_adding", False):
+                return
+
+            sel = getattr(self, "_selected_pid", "")
+            still = next(
+                (x for x in self._profiles if x["id"] == sel), None
             )
-            if cur:
-                self._selected_pid = cur["id"]
-                self._fill_editor(cur)
+            if still is None:
+                # 没选过，或者选中的那套被删了
+                pick = self._profiles[0] if self._profiles else None
+                if pick:
+                    self._selected_pid = pick["id"]
+                    self._fill_editor(pick)
 
         self.api.request_once("/api/engine/profiles", callback=done)
 
@@ -2574,7 +2750,7 @@ class MainWindow(QMainWindow):
             lb = QLabel(
                 f"读不到配置：{err}（后台可能还没起来，重开一下这个窗口）"
                 if err else
-                "还没有配置。点下面「＋ 新增一套」。"
+                "还没有模型。点下面「＋ 新增模型」。"
             )
             lb.setFont(font(11))
             lb.setWordWrap(True)
@@ -2585,7 +2761,11 @@ class MainWindow(QMainWindow):
             return
 
         for prof in self._profiles:
-            is_active = prof["id"] == self._active_pid
+            # ⚠️ 没有"当前"这个概念了。
+            #
+            #    每套配置只有一个状态：开 / 关。
+            #    开着的都可以同时跑（各自限流、各自排队）。
+            #    用户选哪一套只是"选中来编辑"，不影响跑不跑。
             is_sel = prof["id"] == getattr(self, "_selected_pid", "")
 
             row = QFrame()
@@ -2605,25 +2785,17 @@ class MainWindow(QMainWindow):
             rl.setContentsMargins(12, 0, 12, 0)
             rl.setSpacing(10)
 
-            # 状态点
-            #
-            # 三种状态要分开：
-            #   在用         绿（这套正在跑活）
-            #   启用但没在用  黄（可用，只是不是当前那套）
-            #   停用         灰（不参与派活）
+            # 状态点：只有两种
+            #   开着  绿（参与派活）
+            #   关着  灰（不参与）
             is_on = prof.get("enabled", True)
-            if is_active:
-                dot = GlowDot(C_OK, 7)
-            elif is_on:
-                dot = GlowDot(C_WARN, 7)
-            else:
-                dot = GlowDot(C_DIM2, 7)
+            dot = GlowDot(C_OK if is_on else C_DIM2, 7)
             rl.addWidget(dot, 0, Qt.AlignVCenter)
 
             # 名字（固定宽度，让后面的对齐）
             nm = QLabel(prof.get("name") or "未命名")
-            nm.setFont(font(12, QFont.DemiBold if is_active else QFont.Normal))
-            nm.setStyleSheet(f"color:{C_TEXT if is_active else C_TEXT2};")
+            nm.setFont(font(12, QFont.DemiBold))
+            nm.setStyleSheet(f"color:{C_TEXT};")
             nm.setFixedWidth(110)
             rl.addWidget(nm)
 
@@ -2661,37 +2833,45 @@ class MainWindow(QMainWindow):
             #    另外"当前默认用哪套"是另一件事，点行本身来切。
 
             # 开关
-            sw = QPushButton("开着" if is_on else "关着")
+            #
+            # ⚠️ 按钮文字说的是"点下去会怎样"，不是"现在什么状态"。
+            #
+            #    原来写的是「开着 / 关着」——那是描述状态，
+            #    用户看见「开着」会以为"点它也是开"，不敢点。
+            #
+            #    现在：开着 →「停用」，关着 →「启用」。
+            #    状态本身由左边的绿点/灰点表示。
+            sw = QPushButton("停用" if is_on else "启用")
             sw.setCursor(Qt.PointingHandCursor)
             sw.setFixedSize(52, 26)
+            # ⚠️ 颜色跟着**动作**走，不跟状态走。
+            #
+            #    原来：开着绿、关着灰——颜色在描述状态，
+            #    文字却说"停用/启用"，两边打架。
+            #
+            #    现在：
+            #        开着 →「停用」红描边（点了会关掉，给个警示色）
+            #        关着 →「启用」绿实心（点了会打开，给个正色）
+            #
+            #    这样看颜色就知道点下去是"好事"还是"会关掉"。
             if is_on:
                 sw.setStyleSheet(
-                    f"QPushButton{{color:{C_OK}; background:transparent;"
-                    f"border:1px solid {C_OK}; border-radius:6px;"
+                    f"QPushButton{{color:{C_BAD}; background:transparent;"
+                    f"border:1px solid {C_BAD}; border-radius:6px;"
                     f"font-size:11px;}}"
-                    f"QPushButton:hover{{background:{C_OK}; color:white;}}"
+                    f"QPushButton:hover{{background:{C_BAD}; color:white;}}"
                 )
             else:
                 sw.setStyleSheet(
-                    f"QPushButton{{color:{C_DIM2}; background:transparent;"
-                    f"border:1px solid {C_LINE}; border-radius:6px;"
+                    f"QPushButton{{color:white; background:{C_OK};"
+                    f"border:1px solid {C_OK}; border-radius:6px;"
                     f"font-size:11px;}}"
-                    f"QPushButton:hover{{background:{C_LINE};}}"
+                    f"QPushButton:hover{{background:{C_OK}; color:white;}}"
                 )
             sw.clicked.connect(
                 lambda _=False, pid=prof["id"], now=is_on: self._toggle_profile(pid, now)
             )
             rl.addWidget(sw)
-
-            # 当前那套加个标记
-            if is_active:
-                tag = QLabel("当前")
-                tag.setFont(font(9))
-                tag.setStyleSheet(
-                    f"color:{C_ACCENT}; border:1px solid {C_ACCENT};"
-                    f"border-radius:4px; padding:1px 5px;"
-                )
-                rl.addWidget(tag)
 
             # 删除
             dele = QPushButton("删")
@@ -2709,6 +2889,10 @@ class MainWindow(QMainWindow):
             rl.addWidget(dele)
 
             def on_click(_e, pid=prof["id"]):
+                # 点已有的一行 → 退出新增模式。
+                # 不然 _is_adding 还挂着 True，刷新逻辑会一直
+                # 认为"用户正在新增"，永不回填。
+                self._is_adding = False
                 self._selected_pid = pid
                 self._render_profiles()
                 cur = next((x for x in self._profiles if x["id"] == pid), None)
@@ -2718,17 +2902,41 @@ class MainWindow(QMainWindow):
             row.mousePressEvent = on_click
             self.profile_box.addWidget(row)
 
+    def _set_new_mode(self, is_new: bool) -> None:
+        """切换编辑区的模式。
+
+        is_new=True   正在新增 → 显示快速填、测试连接、保存
+        is_new=False  在看已有的一套 → 全藏起来
+
+        为什么看已有的要藏：
+            那套早就存好了，还摆着"快速填某家"的按钮和"保存"，
+            用户会以为每点一下都得存一次。
+        """
+        for w in (
+            getattr(self, "quick_row_host", None),
+            getattr(self, "action_row_host", None),
+        ):
+            if w is not None:
+                w.setVisible(is_new)
+
     def _fill_editor(self, prof: dict) -> None:
         """把某一套填进下面的编辑区。"""
         self.edit_title.setText(f"改「{prof.get('name')}」")
         self.ed_base.setText(prof.get("base_url") or "")
         self._set_model_text(prof.get("model") or "")
 
-        # 下拉框里先放当前模型，等测试连接再拉全量
+        # 下拉框里先放当前模型，等「测试连接」再拉全量
         self.cmb_engine_model.clear()
         if prof.get("model"):
-            self.cmb_engine_model.addItem(prof["model"])
-            self.cmb_engine_model.setCurrentIndex(0)
+            self.cmb_engine_model.addItem(prof["model"], prof["model"])
+
+        # ⚠️ 填 KEY 和地址的时候别把上一步拉到的模型列表清掉。
+        #
+        #    用户点「测试连接」→ 下拉框里变成十几个模型 →
+        #    然后点另一套配置 → 又变回一个。
+        #    这是对的：每套配置的模型列表不一样。
+        self._models_loaded_for = ""
+        self.cmb_engine_model.setCurrentIndex(0)
 
         if prof.get("has_key"):
             self.ed_key.clear()
@@ -2749,19 +2957,46 @@ class MainWindow(QMainWindow):
 
         self.btn_del_profile.setEnabled(True)
 
-    def _add_profile(self) -> None:
-        """新增一套空白配置，然后让用户填。"""
-        def done(data):
-            if isinstance(data, dict) and data.get("ok"):
-                self.lbl_engine.setText("已新增一套，填好信息点保存")
-                self._load_profiles()
-            else:
-                self.lbl_engine.setText("新增失败")
+        # 点的是已有的一套 → 隐藏"新增才用"的那些控件。
+        self._set_new_mode(False)
 
-        self.lbl_engine.setText("正在新增…")
-        self.api.request_once("/api/engine/profiles",
-                              {"action": "add", "name": "新配置"},
-                              callback=done)
+        # 填完自动拉一遍模型列表。
+        #
+        # 用 singleShot 推到当前事件循环之外：
+        #    _fill_editor 是在"点行"和"刷新"两个地方调的，
+        #    直接发请求会在信号处理里嵌套一次网络调用，
+        #    极端情况下界面会卡一下。
+        #    推后一拍执行，界面先画出来再拉。
+        from PySide6.QtCore import QTimer as _QT
+
+        _QT.singleShot(50, lambda: self._fetch_models(silent=True))
+
+    def _add_profile(self) -> None:
+        """切到"新增"状态：清空表单，等用户填。
+
+        ⚠️ 这里**不建配置**。
+        ⚠️ 配置在点「保存」时才真的建。
+
+        为什么：
+            原来点一下就在后端建一条空配置，列表里立刻多一个 tab。
+            用户点了一下又不想建，就白留一个空配置。
+            现在：先填，填完保存才落地。
+        """
+        self._is_adding = True
+        self._selected_pid = ""          # 没有绑定的那一套
+        self._set_new_mode(True)
+
+        self.edit_title.setText("新增模型")
+        self.ed_base.clear()
+        self.ed_key.clear()
+        self.ed_key.setPlaceholderText("粘贴你的 API Key")
+        self.lbl_key_state.setText("")
+        self.cmb_engine_model.clear()
+        self._models_loaded_for = ""
+
+        self.btn_del_profile.setEnabled(False)
+        self.lbl_engine.setText("填好地址和 Key，模型名会自动出来")
+        self.lbl_engine_now.setText("正在：新增")
 
     def _delete_profile(self) -> None:
         pid = getattr(self, "_selected_pid", "")
@@ -2820,8 +3055,15 @@ class MainWindow(QMainWindow):
         # 而且他还得先找到这里才能修好。
         on_count = sum(1 for p in (self._profiles or []) if p.get("enabled", True))
         if currently_on and on_count <= 1:
-            self.lbl_engine.setText("至少得留一套开着，不然没东西跑任务")
-            self.lbl_engine.setStyleSheet(f"color:{C_WARN}; font-size:11px;")
+            # 用弹窗，不用页面底部那行小字。
+            #
+            # 实测：那行字太小、位置偏下，用户点了没反应会以为坏了。
+            QMessageBox.information(
+                self,
+                "得留一套",
+                "至少留一套开着，不然没东西跑任务。\n\n"
+                "想换的话，先把新那套打开，再关这套。",
+            )
             return
 
         def done(data):
@@ -2840,6 +3082,10 @@ class MainWindow(QMainWindow):
 
     def _delete_profile_by_id(self, pid: str) -> None:
         """从列表里直接删一套。"""
+        # 删掉的可能正是"正在新增"时想依附的那套，一并复位
+        if getattr(self, "_selected_pid", "") == pid:
+            self._selected_pid = ""
+            self._is_adding = False
         prof = next((x for x in (self._profiles or []) if x["id"] == pid), None)
         name = (prof or {}).get("name") or "这套"
 
@@ -2896,83 +3142,241 @@ class MainWindow(QMainWindow):
         self.api.request_once("/api/engine", callback=done)
 
     def _model_text(self) -> str:
-        """当前选的模型名。"""
+        """当前选的模型 —— 返回的是 id，不是界面上显示的那个名字。
+
+        比如界面显示 DeepSeek-V4.1-Flash，
+        这里返回 deepseek-flash（调接口必须用这个）。
+        """
+        data = self.cmb_engine_model.currentData()
+        if isinstance(data, str) and data.strip():
+            return data.strip()
         return self.cmb_engine_model.currentText().strip()
 
     def _set_model_text(self, name: str) -> None:
-        """把模型名放进下拉框。列表里有就选中，没有就填进去。"""
+        """把模型名放进下拉框。
+
+        下拉框是不可编辑的（为了长得像下拉框）。
+        但配置里存的模型名可能不在当前列表里——
+        比如列表还没拉到、或者用户手填过一个冷门名字。
+
+        这种情况下临时加一项进去，保证界面上显示的还是真实值。
+        """
         if not name:
             return
-        idx = self.cmb_engine_model.findText(name)
+        # 先按 id 找（正常情况：列表是接口拉的，id 对得上）
+        idx = self.cmb_engine_model.findData(name)
+        if idx < 0:
+            # 再按显示名找（配置里存的就是显示名的情况）
+            idx = self.cmb_engine_model.findText(name)
         if idx >= 0:
             self.cmb_engine_model.setCurrentIndex(idx)
         else:
-            self.cmb_engine_model.setEditText(name)
+            # 都不在 → 插一项进去，显示和值都用这个名字。
+            # 不 setEditText（不可编辑的下拉框没有 lineEdit）。
+            self.cmb_engine_model.insertItem(0, name, name)
+            self.cmb_engine_model.setCurrentIndex(0)
 
-    def _fetch_models(self) -> None:
+    def _fetch_models(self, silent: bool = False) -> None:
         """去接口问有哪些模型，填进下拉框。
 
-        这是「测试连接」之前的一步：知道有哪些模型，
-        用户就不用猜名字了——猜错一个字母就 404。
+        什么时候调：
+            · 点开一套配置时**自动**调（silent=True，不刷状态栏）
+            · 点「测试连接」时再调一次
+
+        为什么自动调：
+            用户的原话——"我现在 deepseek 已经有 key 了啊，
+            不应该直接是下拉框？"
+            对。Key 都在了还要先点个按钮才给下拉框，是多余的。
+
+        silent 是什么意思：
+            自动调的时候不要抢状态栏那行字——
+            用户没点任何东西，屏幕上的字自己在跳，会以为出问题了。
         """
         base = self.ed_base.text().strip()
         key = self.ed_key.text().strip()
-        if not base or not key:
+
+        if not base:
+            self.lbl_engine.setText("先填接口地址")
             return
 
-        self.lbl_engine.setText("正在查可用模型…")
+        # ⚠️ Key 是空的**不等于没填**。
+        #
+        #    已经保存过的 Key 不回显（只显示"已保存 · 尾号 xxxx"），
+        #    所以 ed_key 是空的。
+        #    这时要把 id 一起传过去，让后端用存着的那把 Key。
+        #
+        #    原来这里写的是 `if not base or not key: return`——
+        #    等于凡是"已经存过 Key"的配置，点测试都静默什么都不做。
+        body = {"base_url": base}
+        if key:
+            body["api_key"] = key
+        else:
+            pid = getattr(self, "_selected_pid", "")
+            if not pid:
+                self.lbl_engine.setText("先把 Key 填上")
+                return
+            body["id"] = pid
+
+        if not silent:
+            self.lbl_engine.setText("正在查可用模型…")
+
+        # 临时日志：查清楚这条链路走到哪一步断了
+        try:
+            _log = os.path.join(os.path.expanduser("~"), "Downloads", "dsh_debug.log")
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(f"[fetch_models] body={body}\n")
+        except Exception:
+            pass
 
         def done(data):
+            try:
+                _log = os.path.join(os.path.expanduser("~"), "Downloads", "dsh_debug.log")
+                with open(_log, "a", encoding="utf-8") as _f:
+                    _f.write(f"[fetch_models] resp={str(data)[:300]}\n")
+            except Exception:
+                pass
             if not isinstance(data, dict) or not data.get("ok"):
-                # 查不到就让用户手打，不纠缠
-                self.lbl_engine.setText("查不到模型列表，手动填模型名吧")
+                # 查不到就让用户手打，不纠缠。
+                # 自动调的时候不吭声——用户没点任何东西，
+                # 突然冒一句"查不到"会以为出错了。
+                if not silent:
+                    self.lbl_engine.setText("查不到模型列表，手动填模型名吧")
                 return
-            models = data.get("models") or []
+            ids = data.get("ids") or data.get("models") or []
+            labels = data.get("labels") or ids
             cur = self._model_text()
 
             self.cmb_engine_model.blockSignals(True)
             self.cmb_engine_model.clear()
-            self.cmb_engine_model.addItems(models)
+            for mid, label in zip(ids, labels):
+                # 显示 label，背后挂 id。
+                # 官方 DeepSeek 就是这样：显示 DeepSeek-V4.1-Flash，
+                # 实际调用要用 deepseek-flash。
+                self.cmb_engine_model.addItem(label, mid)
             self.cmb_engine_model.blockSignals(False)
 
             # 现在用的模型如果在列表里就选它，否则用接口推荐的默认值
-            pick = cur if cur in models else (data.get("default") or "")
+            pick = cur if cur in ids else (data.get("default") or "")
             if pick:
                 self._set_model_text(pick)
 
-            self.lbl_engine.setText(f"查到 {len(models)} 个模型，选好后点测试")
+            if not silent:
+                self.lbl_engine.setText(f"查到 {len(ids)} 个模型")
 
         self.api.request_once(
             "/api/engine/models",
-            {"base_url": base, "api_key": key},
+            body,
             timeout=40, callback=done,
         )
 
+    def _suggest_name(self, base_url: str) -> str:
+        """按接口地址给个能认出来的名字。
+
+        ⚠️ 名字不能跟已有的重——重了列表里分不清。
+           所以撞名就加序号：Kimi、Kimi 2、Kimi 3。
+        """
+        low = (base_url or "").lower()
+        base = ""
+        for k, v in (
+            ("deepseek", "DeepSeek"),
+            ("moonshot", "Kimi"),
+            ("kimi", "Kimi"),
+            ("openai", "OpenAI"),
+            ("dashscope", "通义"),
+            ("siliconflow", "硅基流动"),
+            ("bigmodel", "智谱"),
+            ("baichuan", "百川"),
+        ):
+            if k in low:
+                base = v
+                break
+        if not base:
+            try:
+                host = low.split("//", 1)[-1].split("/")[0]
+                base = host.split(".")[0] or "新模型"
+            except Exception:  # noqa: BLE001
+                base = "新模型"
+
+        # 撞名就加序号
+        taken = {
+            (x.get("name") or "").strip().lower()
+            for x in (self._profiles or [])
+        }
+        if base.lower() not in taken:
+            return base
+        i = 2
+        while f"{base} {i}".lower() in taken:
+            i += 1
+        return f"{base} {i}"
+
     def _save_engine(self) -> None:
-        """保存到当前选中的那套配置。"""
+        """保存。
+
+        两种情况：
+            正在新增  → action=add，把表单内容一起提交，建一条新的
+            在看已有的 → action=update，改那一套
+        """
+        adding = getattr(self, "_is_adding", False)
         pid = getattr(self, "_selected_pid", "")
-        if not pid:
-            self.lbl_engine.setText("先新增一套配置")
+
+        if not adding and not pid:
+            self.lbl_engine.setText("先点「＋ 新增模型」")
             return
 
-        body = {
-            "action": "update",
-            "id": pid,
-            "base_url": self.ed_base.text().strip(),
-            "model": self._model_text(),
-            "api_key": self.ed_key.text().strip(),
-        }
-        if not body["base_url"] or not body["model"]:
-            self.lbl_engine.setText("接口地址和模型名都得填")
+        base_url = self.ed_base.text().strip()
+        model = self._model_text()
+        api_key = self.ed_key.text().strip()
+
+        if not base_url:
+            self.lbl_engine.setText("接口地址得填")
             return
+        if not model:
+            self.lbl_engine.setText("模型名得填（等列表出来选一个）")
+            return
+        if adding and not api_key:
+            self.lbl_engine.setText("新模型得填 Key")
+            return
+
+        if adding:
+            # 新增：一次把表单内容全交上去，后端建一条新的。
+            # 名字先按地址给个默认，用户之后可以改。
+            body = {
+                "action": "add",
+                "name": self._suggest_name(base_url),
+                "base_url": base_url,
+                "model": model,
+                "api_key": api_key,
+                "enabled": True,
+            }
+        else:
+            body = {
+                "action": "update",
+                "id": pid,
+                "base_url": base_url,
+                "model": model,
+            }
+            # Key 留空表示"不改"——已经存过的 Key 不回显，
+            # 用户不重打一遍就是不想换。
+            if api_key:
+                body["api_key"] = api_key
 
         def done(data):
             if isinstance(data, dict) and data.get("ok"):
                 self.lbl_engine.setText("已保存")
                 self.ed_key.clear()
+                self._is_adding = False
+                self._set_new_mode(False)
+                # 记下刚建的那套，免得刷新时挑错
+                # 后端 add 返回的是 {"ok": True, "id": "p123"}——
+                # 不要在 data["profile"] 里找。
+                newid = data.get("id") or ""
+                if newid:
+                    self._selected_pid = newid
                 self._load_profiles()
             else:
-                self.lbl_engine.setText("保存失败")
+                self.lbl_engine.setText(
+                    "保存失败：{}".format((data or {}).get("error") or "未知原因")
+                )
 
         self.lbl_engine.setText("保存中…")
         self.api.request_once("/api/engine/profiles", body, callback=done)
@@ -2984,11 +3388,19 @@ class MainWindow(QMainWindow):
         说明名字写错了，当场就能看出来，不用等任务报 404。
         """
         self._fetch_models()
+        _k = self.ed_key.text().strip()
         body = {
             "base_url": self.ed_base.text().strip(),
             "model": self._model_text(),
-            "api_key": self.ed_key.text().strip(),
         }
+        # Key 空着不等于没填——已保存的 Key 不回显。
+        # 这时传 id，让后端用存着的那把。
+        if _k:
+            body["api_key"] = _k
+        else:
+            _pid = getattr(self, "_selected_pid", "")
+            if _pid:
+                body["id"] = _pid
         self.lbl_engine.setText("正在连…")
 
         def done(data):

@@ -223,7 +223,7 @@ def _resolve(path: str) -> str:
     p = os.path.normpath(p)
 
     try:
-        import task_perms as _tp
+        from guard import task_perms as _tp
 
         # 用真实路径判权限（追链接），不是用字符串形态
         if not _tp.is_allowed(_norm_for_check(p), _LEVEL, _WORKDIR):
@@ -897,7 +897,7 @@ def execute(name: str, arguments: str) -> str:
         # agent 模块不可用（比如单独测 tools）——不因此放行。
         # 直接跑一个最小化的检查。
         try:
-            import action_guard as _ag
+            from guard import action_guard as _ag
 
             if name == "run_command":
                 cmd = str(args.get("command") or "")

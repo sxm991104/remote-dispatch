@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from safe_path import is_inside, safe_join, safe_name  # noqa: E402
+from guard.safe_path import is_inside, safe_join, safe_name  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════

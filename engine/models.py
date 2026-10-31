@@ -56,17 +56,45 @@ def list_models(base_url: str, api_key: str) -> tuple[bool, list[str], str]:
     if not isinstance(items, list):
         return False, [], "接口返回的格式不是预期的样子"
 
-    names = []
+    # ⚠️ 有的服务返回两条：id（调接口用）+ name（给人看）。
+    #
+    #    DeepSeek 官方就是这样：
+    #        id   = "deepseek-flash"
+    #        name = "DeepSeek-V4.1-Flash"
+    #
+    #    原来只取 id，下拉框里全是 deepseek-flash——
+    #    跟官方界面上显示的名字对不上，用户会以为查错了。
+    #
+    #    现在优先取 name 显示，id 留着调接口。
+    #    没有 name 的服务（大多数）就用 id 当显示名。
+    pairs: list[tuple[str, str]] = []
     for it in items:
-        if isinstance(it, dict):
-            mid = it.get("id") or it.get("name") or ""
-            if mid:
-                names.append(str(mid))
+        if not isinstance(it, dict):
+            continue
+        mid = str(it.get("id") or "").strip()
+        label = str(it.get("name") or "").strip()
+        if not mid and not label:
+            continue
+        if not mid:
+            mid = label
+        if not label:
+            label = mid
+        pairs.append((mid, label))
 
-    names = sorted(set(names))
-    if not names:
+    # 按显示名排序，重复的按 id 去重
+    seen = set()
+    uniq: list[tuple[str, str]] = []
+    for mid, label in sorted(pairs, key=lambda x: x[1].lower()):
+        if mid in seen:
+            continue
+        seen.add(mid)
+        uniq.append((mid, label))
+
+    if not uniq:
         return False, [], "接口没返回任何模型"
-    return True, names, ""
+
+    # 返回的是 [(id, label)]，调用方自己决定怎么用
+    return True, uniq, ""
 
 
 def pick_default(models: list[str]) -> str:
@@ -82,17 +110,24 @@ def pick_default(models: list[str]) -> str:
 
     skip_words = ("embed", "whisper", "tts", "rerank", "moderation", "audio")
 
-    def usable(name: str) -> bool:
-        low = name.lower()
+    def _id_of(m):
+        return m[0] if isinstance(m, (tuple, list)) else str(m)
+
+    def _label_of(m):
+        return m[1] if isinstance(m, (tuple, list)) and len(m) > 1 else _id_of(m)
+
+    def usable(m) -> bool:
+        low = (_id_of(m) + " " + _label_of(m)).lower()
         return not any(w in low for w in skip_words)
 
     candidates = [m for m in models if usable(m)]
     if not candidates:
-        candidates = models[:]
+        candidates = list(models)
 
-    # 优先带 chat 的
+    # 优先带 chat / flash 的（对话模型）
     for m in candidates:
-        if "chat" in m.lower():
-            return m
+        low = (_id_of(m) + " " + _label_of(m)).lower()
+        if "chat" in low or "flash" in low:
+            return _id_of(m)
 
-    return candidates[0]
+    return _id_of(candidates[0])

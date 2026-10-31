@@ -49,10 +49,10 @@ os.makedirs(os.environ["LOCALAPPDATA"], exist_ok=True)
 sys.path.insert(0, _ROOT)
 sys.stdout.reconfigure(encoding="utf-8")
 
-import action_guard as ag  # noqa: E402
-import count_store  # noqa: E402
-import guard  # noqa: E402
-import task_perms  # noqa: E402
+from guard import action_guard as ag  # noqa: E402
+from guard import count_store  # noqa: E402
+from guard import guard  # noqa: E402
+from guard import task_perms  # noqa: E402
 from engine import agent, tools  # noqa: E402
 
 PASS = 0

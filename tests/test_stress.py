@@ -21,8 +21,8 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import guard  # noqa: E402
-import safe_path  # noqa: E402
+from guard import guard  # noqa: E402
+from guard import safe_path  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════

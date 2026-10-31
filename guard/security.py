@@ -90,7 +90,7 @@ def _restrict_to_me(path: str) -> None:
         现在交给 platform_utils：Windows 走 icacls，Linux 走 chmod。
     """
     try:
-        import platform_utils as _pu
+        from tools import platform_utils as _pu
 
         _pu.tighten_file(path)
     except ImportError:
