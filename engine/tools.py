@@ -341,7 +341,12 @@ def _split_command(command: str) -> list[str]:
     return parts
 
 
-def _decode_output(raw: bytes) -> str:
+def _decode_output(raw) -> str:
+    # ⚠️ 沙箱那条路返回的是 str（从文件读出来的），
+    #    普通 subprocess 返回的是 bytes。
+    #    这里两种都得吃。
+    if isinstance(raw, str):
+        return raw
     """把子进程的输出字节变成文字。
 
     ⚠️ 这里踩过一个很隐蔽的坑，值得写清楚。
@@ -613,6 +618,204 @@ def _run_on_windows(command: str, work_dir: str, env: dict, timeout: int):
             pass
 
 
+# ══════════════════════════════════════════════════════
+# 影子执行（Sandboxie）
+# ══════════════════════════════════════════════════════
+#
+# 为什么要有这一段
+#
+#     守卫在"写脚本再执行"这条路上一直是空的：
+#     命令字符串里没有危险词，脚本内容又千变万化，
+#     词表追不完、内容扫描也追不完。
+#
+#     但"删除"这个动作躲不掉——它一定落在文件系统上。
+#     所以不猜它要干什么，看它真干了什么。
+#
+#     沙箱把顺序倒过来：删除先在影子层发生，真文件不动；
+#     跑完看影子里记了哪些删除；有就扣着，等用户点头。
+#
+# ⚠️ 没装 Sandboxie 就退回原路，一次不差。
+#    但结果里要写明"这次没有影子保护"，不能让调用方以为有。
+
+_SANDBOX_CACHE = None
+
+# 这次任务里被砂箱扣下来的删除。用户确认前一直挂着。
+#
+# 为什么是模块级：一个任务可能跑好几条命令，
+# 每条都可能删东西。攒着一起问，别一条一问把人弹麻。
+_PENDING_DELETES: list[str] = []
+
+
+def _sandbox_state() -> dict:
+    """沙箱当前能不能用。探测一次缓存住。"""
+    global _SANDBOX_CACHE
+    if _SANDBOX_CACHE is not None:
+        return _SANDBOX_CACHE
+
+    d = {"ok": False, "why": "未探测"}
+    try:
+        from guard import sandbox as _sb
+
+        if not _sb.available():
+            d = {"ok": False, "why": "没装 Sandboxie"}
+        elif not _sb.box_exists():
+            d = {"ok": False, "why": "沙箱还没建"}
+        else:
+            d = {"ok": True, "why": ""}
+    except ImportError:
+        d = {"ok": False, "why": "sandbox 模块不在"}
+    except Exception as e:  # noqa: BLE001
+        d = {"ok": False, "why": f"{type(e).__name__}"}
+
+    _SANDBOX_CACHE = d
+    return d
+
+
+def reset_sandbox_cache() -> None:
+    """用户刚装完沙箱时调一下，让下次重新探测。"""
+    global _SANDBOX_CACHE
+    _SANDBOX_CACHE = None
+
+
+def sandbox_status() -> str:
+    """一句话说清当前影子保护的状态。给界面和日志用。"""
+    try:
+        from guard import sandbox as _sb
+
+        return _sb.describe()
+    except ImportError:
+        return "影子执行：模块不在"
+    except Exception as e:  # noqa: BLE001
+        return f"影子执行：探测失败（{type(e).__name__}）"
+
+
+def pending_deletes() -> list[str]:
+    """还没确认的删除。"""
+    return list(_PENDING_DELETES)
+
+
+def commit_pending_deletes() -> list:
+    """把扣着的删除真执行掉。验证码通过之后调。"""
+    global _PENDING_DELETES
+    if not _PENDING_DELETES:
+        return []
+    try:
+        from guard import sandbox as _sb
+
+        res = _sb.commit_deferred(_PENDING_DELETES)
+    except ImportError:
+        res = []
+    _PENDING_DELETES = []
+    return res
+
+
+def discard_pending_deletes() -> None:
+    """把扣着的删除丢掉（用户不认这笔）。"""
+    global _PENDING_DELETES
+    _PENDING_DELETES = []
+
+
+def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
+                                timeout: int):
+    """在沙箱里跑。不可用返回 None，调用方退回普通执行。
+
+    ⚠️ 这里只管"跑"和"记下删除"，不管"问用户"。
+        问用户是异步的（发邮件、等人回），
+        而 run_command 是同步阻塞的——模型在等结果。
+        在这里卡住等验证码，整个任务就冻了，
+        而人可能根本不在电脑前。
+    """
+    st = _sandbox_state()
+    if not st["ok"]:
+        return None
+
+    try:
+        from guard import sandbox as _sb
+    except ImportError:
+        return None
+
+    try:
+        base = _sb.snapshot()
+    except Exception:  # noqa: BLE001
+        base = set()
+
+    try:
+        p = _sb.run_in_box(
+            command,
+            cwd=work_dir,
+            env=env,
+            timeout=max(5, min(timeout, 600)),
+            capture=True,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    if p is None:
+        return None
+
+    # 跑完了，分两件事处理：
+    #
+    #   一、写入/修改 → 立刻回写到真机
+    #       用户无感，跟没装沙箱一样。
+    #       不回写的话，用户在资源管理器里根本看不到新文件——
+    #       那等于把"写文件"这个基本功能废了。
+    #
+    #   二、删除      → 扣着，等验证码
+    #       只有这个是不可逆的，只有它需要问人。
+    try:
+        import time as _t
+
+        _t.sleep(0.6)      # 影子落盘有一点点延迟
+        res = _sb.apply_after_run(baseline=base)
+        got = res.get("deletes") or []
+        # 回写完了，把已落盘的影子清掉，别让下一轮重复处理
+        _sb.clean_written_shadows(baseline=base)
+    except Exception:  # noqa: BLE001
+        got = []
+
+    if got:
+        global _PENDING_DELETES
+        for g in got:
+            if g not in _PENDING_DELETES:
+                _PENDING_DELETES.append(g)
+
+        # ⚠️ 关键一步：把"沙箱发现了删除"这件事交给动作守卫。
+        #
+        #    沙箱不是另一套机制，它是守卫的**另一只眼睛**：
+        #
+        #        词表   看命令行写了什么
+        #        沙箱   看文件系统真发生了什么
+        #
+        #    两只眼睛看到的东西都走同一个入口——guard_gate.intercept。
+        #    于是：
+        #
+        #        明写的删除    →  词表拦 → 计数 +1
+        #        藏起来的删除  →  沙箱拦 → 计数 +1
+        #                                  ↑ 走同一条路
+        #
+        #    三次锁死、发验证码、清计数，全都复用已有的那套，
+        #    不新造机制、不新开一条验证码通道。
+        try:
+            from guard import guard_gate as _gg
+
+            shown = ", ".join(os.path.basename(x) for x in got[:3])
+            more = f" 等 {len(got)} 个" if len(got) > 3 else ""
+            _hit = _gg.intercept(
+                shown,
+                f"沙箱发现它在删工作区外的文件：{shown}{more}",
+            )
+            if _hit.get("tripped"):
+                # 到三次了，把话说明白——模型要看见自己把任务端搞锁了。
+                return (
+                    "命令跑了，但它试图删除工作区外的文件，已被影子层拦下。\n"
+                    f"{_hit.get('message')}"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+    return p
+
+
 def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
     """跑一条命令。
 
@@ -667,7 +870,9 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
     #
     #    这是 CI 打出来的：中文 Windows（936）上一直是绿的。
     if sys.platform == "win32":
-        r = _run_on_windows(command, work_dir, env, timeout)
+        r = _run_in_sandbox_if_possible(command, work_dir, env, timeout)
+        if r is None:
+            r = _run_on_windows(command, work_dir, env, timeout)
     else:
         args = _build_args(command)
         try:
