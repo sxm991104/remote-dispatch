@@ -58,24 +58,44 @@ jobs:
         run: |
           python -m pip install python-docx openpyxl python-pptx pypdf
 
+      # ⚠️ 失败时把日志写进 job summary。
+      #
+      #    2026-11-01 那次推送，Windows 上两个 Python 版本都红了，
+      #    而本机跑了三遍（含模拟干净环境）都是绿的。
+      #
+      #    想看 CI 日志得下载 job log，那个接口要 admin 权限 ——
+      #    也就是说：**CI 红了，作者不一定知道为什么。**
+      #
+      #    现在失败时把最后 200 行写进 summary，网页上直接能看，
+      #    不用 token、不用下载。
       - name: 跑回归测试
-        run: python tests/run_all.py
+        shell: bash
+        run: |
+          set +e
+          python tests/run_all.py 2>&1 | tee /tmp/reg.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$rc" -ne 0 ]; then
+            {
+              echo "## 回归测试失败（退出码 $rc）"
+              echo ""
+              echo '```'
+              tail -200 /tmp/reg.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
 
       # ⚠️ 红队脚本单独跑一遍，跟 run_all 里那次是两层保险。
       #
-      #    有人指出过：run_all.py 里跑 redteam_ext，但没把它的失败
-      #    接进退出码，于是 322 条断言是装饰性的。
-      #    run_all 那边已经修了（白名单外的真失败会计数）。
+      #    run_all.py 里跑 redteam_ext，但它自己的白名单是维护着的；
+      #    万一哪天有人把关键条目加进 known，run_all 就会变绿，
+      #    而这一步不会 —— 它看着脚本的原始结果。
       #
-      #    这里再单独跑一次，是因为：
-      #        run_all 里的白名单是我们自己维护的，
-      #        万一哪天有人不小心把关键条目加进 known，
-      #        run_all 就会变绿，而这一步不会 ——
-      #        它能看见脚本的原始退出码。
-      #
-      #    已知会失败的那几条（我们明确不同意的）在这里也会显示，
-      #    但这一步的判据是"除了 known 之外还有没有真失败"，
-      #    所以正常的红队结果不会让它变红。
+      #    判据：把明确不同意的条目过滤掉，看还剩不剩失败。
+      #    用 bash 是为了两个平台行为一致
+      #    （Windows runner 上也有 bash，来自 Git for Windows）。
       - name: 跑红队测试
         shell: bash
         run: |
