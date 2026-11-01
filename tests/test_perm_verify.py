@@ -20,7 +20,11 @@ os.environ["LOCALAPPDATA"] = os.path.join(TMP, "local")
 os.makedirs(os.environ["APPDATA"], exist_ok=True)
 os.makedirs(os.environ["LOCALAPPDATA"], exist_ok=True)
 
-sys.path.insert(0, r"D:\Project\dsh-bridge-oss")
+# ⚠️ 不能写死路径。原来写的是 r"D:\Project\dsh-bridge-oss"，
+#    换台机器直接 ModuleNotFoundError。
+#    这个文件的上一级就是仓库根。
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _HERE)
 sys.stdout.reconfigure(encoding="utf-8")
 
 from guard import task_perms  # noqa: E402
@@ -66,7 +70,12 @@ import importlib.util  # noqa: E402
 
 spec = importlib.util.spec_from_file_location(
     "api_server",
-    r"D:\Project\dsh-bridge-oss\api_server.py",
+    os.path.join(_HERE, "server", "api_server.py"),
+    # ⚠️ 上面这行原来是 r"D:\Project\dsh-bridge-oss\api_server.py"。
+    #    路径写死是问题之一；更糟的是**路径本身就错** ——
+    #    api_server.py 在 server/ 下，不在仓库根。
+    #    于是这个测试一直在走 except 分支：打印「跳过接口测试」然后 exit 0，
+    #    而 run_all 看到退出码 0 就认为它过了。接口那一段从来没被测过。
 )
 api = importlib.util.module_from_spec(spec)
 try:

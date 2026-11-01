@@ -130,6 +130,8 @@ def scan_common_roots() -> list[dict]:
         roots = [
             os.path.join(home, "Downloads"),
             os.path.join(home, "Projects"),
+            os.path.join(home, "Documents"),
+            # 作者的习惯位置。别人没有就跳过（下面逐个 isdir 判断）。
             "D:\\Project",
         ]
     out = []

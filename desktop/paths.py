@@ -146,13 +146,27 @@ def detect_qq() -> str:
 
 
 def detect_napcat() -> str:
-    """找 NapCat 目录。认它里面必须有 NapCatWinBootMain.exe。"""
-    roots = [
-        r"D:\qqaibot\napcat",
-        r"C:\qqaibot\napcat",
+    """找 NapCat 目录。认它里面必须有 NapCatWinBootMain.exe。
+
+    ⚠️ 候选里那两个 D:/C: 是**作者自己的习惯位置**，不是要求。
+        别人机器上没有就跳过——下面几个环境变量候选才是通用的。
+
+        想指定的话设 QQAIBOT_HOME（指向 qqaibot 那个父目录），
+        它排在最前面，一设就不用管别的了。
+    """
+    roots = []
+    # 用户显式指定的最优先
+    explicit = os.environ.get("QQAIBOT_HOME", "").strip()
+    if explicit:
+        roots.append(os.path.join(explicit, "napcat"))
+
+    roots += [
         os.path.expandvars(r"%USERPROFILE%\qqaibot\napcat"),
         os.path.expandvars(r"%LOCALAPPDATA%\qqaibot\napcat"),
         os.path.expandvars(r"%APPDATA%\qqaibot\napcat"),
+        # 作者的习惯位置。别人机器上没有就跳过，不影响。
+        r"D:\qqaibot\napcat",
+        r"C:\qqaibot\napcat",
     ]
     for root in roots:
         if not os.path.isdir(root):
@@ -195,17 +209,28 @@ def detect_astrbot() -> tuple[str, str, str]:
                 pyw = cand
                 break
         cwd = ""
-        for cand in (r"D:\qqaibot\astrbot", r"C:\qqaibot\astrbot"):
+        # 跟 detect_napcat 一样：环境变量优先，
+        # 然后作者的习惯位置（别人没有就跳过）。
+        _cands = []
+        _explicit = os.environ.get("QQAIBOT_HOME", "").strip()
+        if _explicit:
+            _cands.append(os.path.join(_explicit, "astrbot"))
+        _cands += [r"D:\qqaibot\astrbot", r"C:\qqaibot\astrbot"]
+        for cand in _cands:
             if os.path.isdir(cand):
                 cwd = cand
                 break
         return exe, pyw, cwd
 
-    guesses = [
+    guesses = []
+    _explicit = os.environ.get("QQAIBOT_HOME", "").strip()
+    if _explicit:
+        guesses.append(os.path.join(_explicit, ".bot_runtime", "astrbot.exe"))
+    guesses += [
         os.path.expandvars(r"%USERPROFILE%\.local\bin\astrbot.exe"),
-        # 用户名不能写死——换台机器就不对了，所以只用环境变量拼
-        r"D:\qqaibot\.bot_runtime\astrbot.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\astrbot\astrbot.exe"),
+        # 作者的习惯位置。别人没有就跳过。
+        r"D:\qqaibot\.bot_runtime\astrbot.exe",
     ]
     for g in guesses:
         if os.path.exists(g):
