@@ -154,19 +154,26 @@ def detect_napcat() -> str:
         想指定的话设 QQAIBOT_HOME（指向 qqaibot 那个父目录），
         它排在最前面，一设就不用管别的了。
     """
+    # ⚠️ 这里不再有任何写死的路径。
+    #
+    #    原来候选里有两个 D:\qqaibot\napcat / C:\qqaibot\napcat ——
+    #    那是作者自己机器上的位置，不是任何人的约定。
+    #    桌面端的「路径配置」里能直接指定 NapCat 目录，
+    #    所以探测只需要覆盖**通用的**几个位置就够了。
     roots = []
-    # 用户显式指定的最优先
+
+    # 一、环境变量显式指定（部署脚本可以用）
     explicit = os.environ.get("QQAIBOT_HOME", "").strip()
     if explicit:
         roots.append(os.path.join(explicit, "napcat"))
 
+    # 二、常见的标准位置（都是环境变量拼的，不写死盘符）
     roots += [
         os.path.expandvars(r"%USERPROFILE%\qqaibot\napcat"),
         os.path.expandvars(r"%LOCALAPPDATA%\qqaibot\napcat"),
         os.path.expandvars(r"%APPDATA%\qqaibot\napcat"),
-        # 作者的习惯位置。别人机器上没有就跳过，不影响。
-        r"D:\qqaibot\napcat",
-        r"C:\qqaibot\napcat",
+        os.path.expandvars(r"%USERPROFILE%\NapCat"),
+        os.path.expandvars(r"%LOCALAPPDATA%\NapCat"),
     ]
     for root in roots:
         if not os.path.isdir(root):
@@ -209,13 +216,15 @@ def detect_astrbot() -> tuple[str, str, str]:
                 pyw = cand
                 break
         cwd = ""
-        # 跟 detect_napcat 一样：环境变量优先，
-        # 然后作者的习惯位置（别人没有就跳过）。
+        # 工作目录也是通用探测，不写死。
         _cands = []
         _explicit = os.environ.get("QQAIBOT_HOME", "").strip()
         if _explicit:
             _cands.append(os.path.join(_explicit, "astrbot"))
-        _cands += [r"D:\qqaibot\astrbot", r"C:\qqaibot\astrbot"]
+        _cands += [
+            os.path.expandvars(r"%USERPROFILE%\qqaibot\astrbot"),
+            os.path.expandvars(r"%LOCALAPPDATA%\qqaibot\astrbot"),
+        ]
         for cand in _cands:
             if os.path.isdir(cand):
                 cwd = cand
@@ -229,8 +238,8 @@ def detect_astrbot() -> tuple[str, str, str]:
     guesses += [
         os.path.expandvars(r"%USERPROFILE%\.local\bin\astrbot.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\astrbot\astrbot.exe"),
-        # 作者的习惯位置。别人没有就跳过。
-        r"D:\qqaibot\.bot_runtime\astrbot.exe",
+        os.path.expandvars(r"%PROGRAMFILES%\AstrBot\astrbot.exe"),
+        os.path.expandvars(r"%PROGRAMFILES(X86)%\AstrBot\astrbot.exe"),
     ]
     for g in guesses:
         if os.path.exists(g):

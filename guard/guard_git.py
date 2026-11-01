@@ -127,12 +127,15 @@ def scan_common_roots() -> list[dict]:
         roots = [x for x in env_roots.split(";") if x.strip()]
     else:
         home = os.path.expanduser("~")
+        # 不写死任何路径 —— 只扫用户目录下几个通用的项目位置。
+        # 想扫别的地方，设 GUARD_ROOTS 环境变量（上面那个分支）。
         roots = [
             os.path.join(home, "Downloads"),
             os.path.join(home, "Projects"),
             os.path.join(home, "Documents"),
-            # 作者的习惯位置。别人没有就跳过（下面逐个 isdir 判断）。
-            "D:\\Project",
+            os.path.join(home, "Desktop"),
+            os.path.join(home, "source"),
+            os.path.join(home, "repos"),
         ]
     out = []
     for base in roots:

@@ -205,14 +205,28 @@ def _check_astrbot() -> dict:
     """
     custom = load_custom_paths().get("astrbot") or ""
 
+    # ⚠️ 不写死盘符。
+    #
+    #    原来候选里有 D:\qqaibot\astrbot 和 C:\astrbot ——
+    #    那是作者机器上的位置。别人换了盘、换了用户名就找不到。
+    #
+    #    现在的顺序：
+    #      一、用户自己配的（桌面端「路径配置」里的 astrbot_cwd）
+    #      二、环境变量 QQAIBOT_HOME
+    #      三、用户目录下几个通用位置
     candidates = []
     if custom:
         candidates.append(custom)
+
+    _explicit = os.environ.get("QQAIBOT_HOME", "").strip()
+    if _explicit:
+        candidates.append(os.path.join(_explicit, "astrbot"))
+
     candidates += [
-        r"D:\qqaibot\astrbot",
+        os.path.expanduser(r"~\qqaibot\astrbot"),
         os.path.expanduser(r"~\astrbot"),
-        r"C:\astrbot",
         os.path.expanduser(r"~\Downloads\astrbot"),
+        os.path.expandvars(r"%LOCALAPPDATA%\qqaibot\astrbot"),
     ]
 
     for p in candidates:

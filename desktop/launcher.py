@@ -203,10 +203,43 @@ class Launcher:
         if not self.napcat_dir:
             return False, "还没设置 NapCat 在哪。去「设置」里选一下。"
 
-        launcher = os.path.join(self.napcat_dir, "NapCatWinBootMain.exe")
-        hook = os.path.join(self.napcat_dir, "NapCatWinBootHook.dll")
-        if not os.path.exists(launcher):
-            return False, f"NapCat 目录里找不到启动器：{launcher}"
+        # ⚠️ 配置里存的可能是**父目录**，也可能是版本目录本身。
+        #
+        #    实测：配的是 D:/qqaibot/napcat，
+        #    而启动器在 D:/qqaibot/napcat/v436/NapCatWinBootMain.exe。
+        #
+        #    detect_napcat() 会往下扫一层能认出来，
+        #    但这里直接拼路径就找不到 —— 报"目录里找不到启动器"。
+        #    用户按界面提示选了父目录，然后启动失败，谁也说不清为什么。
+        #
+        #    所以用的时候也往下扫一层，跟 detect_napcat 一致。
+        def _locate(root: str):
+            """找到 (版本目录, 启动器路径)。找不到返回 ("", "")。"""
+            if not root or not os.path.isdir(root):
+                return "", ""
+            direct = os.path.join(root, "NapCatWinBootMain.exe")
+            if os.path.exists(direct):
+                return root, direct
+            try:
+                for name in os.listdir(root):
+                    sub = os.path.join(root, name)
+                    if os.path.isdir(sub) and os.path.exists(
+                        os.path.join(sub, "NapCatWinBootMain.exe")
+                    ):
+                        return sub, os.path.join(sub, "NapCatWinBootMain.exe")
+            except OSError:
+                pass
+            return "", ""
+
+        _dir, launcher = _locate(self.napcat_dir)
+        if not launcher:
+            return False, (
+                f"NapCat 目录里找不到启动器（NapCatWinBootMain.exe）："
+                f"{self.napcat_dir}"
+            )
+        # 后面的环境变量都按**版本目录**来（qqnt.json / napcat.mjs 在那一层）
+        self.napcat_dir = _dir
+        hook = os.path.join(_dir, "NapCatWinBootHook.dll")
 
         qq = _cfg_get("qq_exe")
         if not qq or not os.path.exists(qq):

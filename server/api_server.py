@@ -195,16 +195,16 @@ def _qrcode_patterns() -> list[str]:
         pats.append(os.path.join(nap, "cache", "qrcode.png"))
     # 兜底：常见位置下再找一层
     #
-    # ⚠️ D:/C: 那两条是作者的习惯位置，别人机器上没有就跳过。
-    #    上面 paths.get("napcat_dir") 才是用户真实配的那个。
+    # ⚠️ 不写死任何盘符。上面 paths.get("napcat_dir") 才是用户配的那个，
+    #    这里只是碰运气扫一下几个通用的地方。
     _roots = []
     _explicit = os.environ.get("QQAIBOT_HOME", "").strip()
     if _explicit:
         _roots.append(os.path.join(_explicit, "napcat"))
     _roots += [
         os.path.expandvars(r"%USERPROFILE%\qqaibot\napcat"),
-        r"D:\qqaibot\napcat",
-        r"C:\qqaibot\napcat",
+        os.path.expandvars(r"%LOCALAPPDATA%\qqaibot\napcat"),
+        os.path.expandvars(r"%APPDATA%\qqaibot\napcat"),
     ]
     for root in _roots:
         pats.append(os.path.join(root, "*", "cache", "qrcode.png"))
