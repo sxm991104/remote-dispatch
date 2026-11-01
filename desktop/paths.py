@@ -333,12 +333,35 @@ def set_autostart(on: bool) -> tuple[bool, str]:
         args = ""
         workdir = os.path.dirname(exe)
     else:
-        # 源码运行：用 pythonw 跑 desktop_qt.py，避免开个黑框
+        # 源码运行：用 pythonw 跑桌面端入口，避免开个黑框。
+        #
+        # ⚠️ 这里原来写死 desktop_qt.py —— 那个文件早就在
+        #    v1.3.3 那次结构重组里拆成 desktop/app.py 了。
+        #
+        #    于是快捷方式建出来是个死链，而下面只看"建成了没有"，
+        #    所以一直报"已设置成功"，下次开机什么都没有。
+        #
+        #    现在：入口按存在性挑，找不到就明确失败，不假成功。
         pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
         if not os.path.exists(pyw):
             pyw = sys.executable
         exe = pyw
-        args = f'"{os.path.join(app_dir(), "desktop_qt.py")}"'
+
+        _cands = [
+            os.path.join(app_dir(), "desktop", "app.py"),
+            os.path.join(app_dir(), "start_desktop.pyw"),
+        ]
+        entry = ""
+        for _c in _cands:
+            if os.path.exists(_c):
+                entry = _c
+                break
+        if not entry:
+            return False, (
+                "找不到桌面端入口（desktop/app.py 或 start_desktop.pyw），"
+                "没法设开机自启。程序装了之后应该会重新生成这些文件。"
+            )
+        args = f'"{entry}"'
         workdir = app_dir()
 
     try:

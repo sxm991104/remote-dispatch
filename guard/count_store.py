@@ -62,6 +62,7 @@ import secrets
 import sys
 import tempfile
 import threading
+import time
 
 # ── 文件位置 ────────────────────────────────────────────
 
@@ -411,15 +412,33 @@ def load() -> dict:
         )
 
     if main_ok and shadow_ok:
-        # 两边都可信。得内容也一致，否则说明"只改了其中一边还顺手重签了"
+        # 两边都可信（签名都对）。
         if _canonical(main) == _canonical(shadow):
             return main
 
-        # 内容不一致：以影子为准（影子藏在更深、更不显眼的地方）
-        d = dict(shadow)
-        d["tamper"] = int(d.get("tamper", 0)) + 1
-        _persist(d, key)
-        return d
+        # ⚠️ 签名都对但内容不同 —— **这不一定是篡改**。
+        #
+        #    原来是：一律按篡改处理（tamper + 1，以影子为准）。
+        #    实测（两个进程各 bump 200 次）：tamper 涨到 312，
+        #    计数停在 407（本该 400）。
+        #
+        #    因为 _persist 是**先写主、再写影子**，中间那一瞬两边不同。
+        #    两个进程交替跑，几乎每次都撞在这个中间态上。
+        #
+        #    而且这不是安全事件：
+        #        签名对得上 = 两份都是我们自己写的
+        #        签名对不上 = 有人动过手
+        #    前者只是先后不同，取更新的那份就行；
+        #    后者才会走到下面那两个分支（main_ok / shadow_ok 分开判）。
+        def _stamp(x) -> str:
+            return str(x.get("updated") or "")
+
+        newer, newer_stamp = (main, _stamp(main))
+        if _stamp(shadow) > newer_stamp:
+            newer = shadow
+        # 把较新的那份同步回两边，别让不一致一直挂着
+        _persist(dict(newer), key)
+        return dict(newer)
 
     if shadow_ok:
         # 主文件坏了，用影子恢复
@@ -574,6 +593,112 @@ def _today() -> str:
 #    这在正常使用里不太会撞上（一天被拦三次就锁死了），
 #    但攻击者可以用并发来"洗掉"计数——正是我们需要防的事。
 _LOCK = threading.RLock()
+# ⚠️ 这把锁只管**同一个进程内的多个线程**。
+#
+#    而这个程序有两个进程会 bump 计数：
+#        AstrBot  （前台插件里 import guard）
+#        桥接口    （server/api_server.py）
+#
+#    两边各自拿着自己那份 RLock，同时读-改-写计数文件 → 互相覆盖。
+#    下面的注释自己就写着"攻击者可以用并发来洗掉计数"，
+#    而防线只做了半个（只防了同进程的线程）。
+#
+#    所以下面再加一层跨进程的文件锁。
+
+
+def _cross_process_lock():
+    """跨进程的文件锁。返回一个上下文管理器。
+
+    Windows 用 msvcrt.locking，POSIX 用 fcntl.flock。
+
+    加锁的对象是 main_path() 旁边的一个 .lock 文件 ——
+    不锁计数文件本身，因为它是"写 tmp 再 os.replace"，
+    replace 之后那个名字指向新文件了，锁跟着飞。
+
+    ⚠️ 踩过的两个坑，都跟 Windows 的语义有关：
+
+        坑一  用 "a+b" 打开时，文件指针在**末尾**。
+             而 msvcrt.locking 是**从当前指针位置**开始锁字节。
+             文件有 1 字节时，指针在 1，锁第 1 个字节 —— 那是文件外，
+             一直 EACCES。所以每次都拿不到锁（实测：False）。
+
+        坑二  文件长度 0 时锁不住（要锁 0 个字节，等于没锁）。
+
+        解法：先 seek(0)，保证文件至少 1 字节，再锁第 0 个字节。
+              拿到锁之后指针也在 0，正好。
+
+    拿不到锁（争用超过 10 秒）不抛异常：
+        计数丢一次比整个功能卡住好。但会留一条日志。
+    """
+    import contextlib
+
+    lock_path = main_path() + ".lock"
+
+    @contextlib.contextmanager
+    def _hold():
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        f = open(lock_path, "r+b" if os.path.exists(lock_path) else "w+b")
+        try:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    # 保证至少 1 字节（0 字节的锁等于没锁）
+                    f.seek(0, os.SEEK_END)
+                    if f.tell() == 0:
+                        f.write(b"\0")
+                        f.flush()
+
+                    # ⚠️ 必须 seek(0)：默认指针在末尾，
+                    #    msvcrt 从当前位置锁，锁不到开头的字节。
+                    deadline = time.time() + 10
+                    got = False
+                    while time.time() < deadline:
+                        try:
+                            f.seek(0)
+                            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                            got = True
+                            break
+                        except OSError:
+                            time.sleep(0.01)
+                    try:
+                        yield got
+                    finally:
+                        if got:
+                            try:
+                                f.seek(0)
+                                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                            except OSError:
+                                pass
+                else:
+                    import fcntl
+
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    try:
+                        yield True
+                    finally:
+                        try:
+                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                        except OSError:
+                            pass
+            except Exception as _e:  # noqa: BLE001
+                # 加锁本身出错（不是争用）—— 留痕迹但不停。
+                try:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "跨进程锁不可用（%s），本次计数可能被并发覆盖", _e
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                yield False
+        finally:
+            try:
+                f.close()
+            except OSError:
+                pass
+
+    return _hold()
 
 
 def bump() -> dict:

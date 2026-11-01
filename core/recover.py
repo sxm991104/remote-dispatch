@@ -66,7 +66,34 @@ def _progress_path(workspaces: str, task_id: str) -> str:
     return os.path.join(workspaces, task_id, ".progress.json")
 
 
+def _global_progress_path(workspaces: str) -> str:
+    """心跳**真正**写的地方。
+
+    ⚠️ 心跳只写一份总的，在 BRIDGE_DIR/.progress.json（见 bridge.PROGRESS），
+        而 workspaces 的上一级就是 BRIDGE_DIR。
+
+        原来 _read_progress 只找 workspaces/<task_id>/.progress.json，
+        那个文件**从来没人写** —— 所以心跳永远读不到，
+        于是所有 running 的任务在 API 启动时全被判成"中断"。
+
+        实测：任务明明在跑，重启接口之后列表里变成 interrupted。
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(workspaces)), ".progress.json")
+
+
 def _read_progress(workspaces: str, task_id: str) -> dict:
+    """读这个任务的心跳。先看总的那份，再看任务目录里那份。"""
+    # 一、总的那份，按 id 匹配
+    g = _global_progress_path(workspaces)
+    try:
+        with open(g, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and d.get("id") == task_id:
+            return d
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    # 二、任务目录里那份（老版本写的，留着兼容）
     p = _progress_path(workspaces, task_id)
     try:
         with open(p, encoding="utf-8") as f:

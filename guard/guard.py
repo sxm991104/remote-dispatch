@@ -873,13 +873,43 @@ def send_code_email(task: str, purpose: str = "",
 
         host = c.get("smtp_host")
         port = int(c.get("smtp_port") or 465)
-        use_ssl = port == 465 or bool(c.get("smtp_ssl", True))
+
+        # ⚠️ 端口决定用不用 SSL，不能靠那个从没被写过的标记。
+        #
+        #    原来写的是：
+        #        use_ssl = port == 465 or bool(c.get("smtp_ssl", True))
+        #
+        #    而 smtp_ssl 这个键**全仓没有一处写它** —— 永远是默认值 True。
+        #    于是后半句恒真：不管端口多少都走 SMTP_SSL。
+        #
+        #    而预置表里这几家是 587，必须 STARTTLS：
+        #        outlook / hotmail / live       smtp-mail.outlook.com:587
+        #        office365                      smtp.office365.com:587
+        #        icloud                         smtp.mail.me.com:587
+        #    走 SMTP_SSL 连 587 一定失败 → 这几家用户永远收不到验证码。
+        #
+        #    现在按端口判：
+        #        465        → SSL（SMTPS，最老也最常见）
+        #        587 / 25   → 明文连接 + STARTTLS
+        #        其他       → 有显式 smtp_ssl 就听它，没有就按端口猜
+        _explicit = c.get("smtp_ssl")
+        if port == 465:
+            use_ssl = True
+        elif port in (587, 25, 2525):
+            use_ssl = False if _explicit is None else bool(_explicit)
+        else:
+            use_ssl = bool(_explicit) if _explicit is not None else False
 
         if use_ssl:
-            server = smtplib.SMTP_SSL(host, port, timeout=20)
+            server = smtplib.SMTP_SSL(
+                host, port, timeout=20,
+                context=ssl.create_default_context(),
+            )
         else:
             server = smtplib.SMTP(host, port, timeout=20)
-            server.starttls()
+            server.ehlo()
+            server.starttls(context=ssl.create_default_context())
+            server.ehlo()
 
         try:
             if c.get("smtp_user") and c.get("smtp_pass"):

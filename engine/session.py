@@ -182,5 +182,23 @@ def compress(messages: list[dict], keep_last: int = 8,
         + "\n【摘要结束，以下是最近的对话】"
     )
 
-    new = [{"role": "system", "content": digest}] + tail
+    # ⚠️ 不能把 digest 当第一条 system —— 那会把原来的开工规矩顶掉。
+    #
+    #    原来写的是：
+    #        new = [{"role": "system", "content": digest}] + tail
+    #
+    #    而 messages 里开头那条 system 是 SYSTEM_PROMPT（开工规矩：
+    #    "先看清再动手""不许瞎编路径"那些）。压缩一次就没了 ——
+    #    之后的任务行为会明显变差，而且看不出来是压缩导致的。
+    #
+    #    现在：原来的 system 原样保留在最前面；
+    #          有 system 就把 digest 放在它后面，
+    #          没有 system 才让 digest 当第一条。
+    _systems = [m for m in messages if m.get("role") == "system"]
+    _digest_msg = {"role": "system", "content": digest}
+
+    if _systems:
+        new = list(_systems) + [_digest_msg] + tail
+    else:
+        new = [_digest_msg] + tail
     return new, True
