@@ -148,6 +148,18 @@ jobs:
               tail -200 /tmp/reg.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # ⚠️ 把失败的测试名打成 annotation。
+            #
+            #    job 日志要登录态才看得到，但 annotation 不用 ——
+            #    API 的 check-runs 接口就能读到。
+            #    所以这里把 FAILED 那几行挑出来，逐条打。
+            grep -E '^(FAILED|tests/.*FAILED)' /tmp/reg.log 2>/dev/null | head -20 | while read -r L; do
+              echo "::error::$L"
+            done
+            # 再打一条汇总，防止一条 FAILED 都没有（比如崩在收集阶段）
+            if ! grep -q "^FAILED" /tmp/reg.log 2>/dev/null; then
+              echo "::error::回归测试失败但没有 FAILED 行，看 summary 里的最后 200 行"
+            fi
             exit "$rc"
           fi
 
