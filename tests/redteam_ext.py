@@ -41,10 +41,21 @@ os.environ["LOCALAPPDATA"] = os.path.join(_TMP, "local")
 os.makedirs(os.environ["APPDATA"], exist_ok=True)
 os.makedirs(os.environ["LOCALAPPDATA"], exist_ok=True)
 
+# ⚠️ Windows CI 上 stdout 的默认编码是 cp1252（英文系统），
+#    里面没有 ✅ ✗ 这些符号，print 会直接抛 UnicodeEncodeError。
+#    实测：整个测试一条都没跑就崩了，而 Ubuntu 上一直是绿的。
 try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+    from tools.console import mark_utf8 as _mark_utf8
+except ImportError:
+    import os as _os0
+    import sys as _sys0
+
+    _sys0.path.insert(
+        0, _os0.path.dirname(_os0.path.dirname(_os0.path.abspath(__file__)))
+    )
+    from tools.console import mark_utf8 as _mark_utf8
+_mark_utf8()
+
 
 from guard import action_guard as ag          # noqa: E402
 from guard import count_store                 # noqa: E402

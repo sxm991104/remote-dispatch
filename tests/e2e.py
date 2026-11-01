@@ -31,13 +31,73 @@
     1  有失败
 """
 
+
 from __future__ import annotations
+
+# ⚠️ Windows CI 上 stdout 的默认编码是 cp1252（英文系统），
+#    里面没有 ✅ ✗ 这些符号，print 会直接抛 UnicodeEncodeError。
+#    实测：整个测试一条都没跑就崩了，而 Ubuntu 上一直是绿的。
+#
+#    下面这两行必须在任何 print 之前执行。
+try:
+    from tools.console import mark_utf8 as _mark_utf8
+except ImportError:
+    import os as _os0, sys as _sys0
+    _sys0.path.insert(0, _os0.path.dirname(_os0.path.dirname(_os0.path.abspath(__file__))))
+    from tools.console import mark_utf8 as _mark_utf8
+_mark_utf8()
+
+# ⚠️ 必须在任何 print 之前把 stdout 换成 UTF-8。
+#
+#    Windows CI 上 python 的默认 stdout 编码是 cp1252（英文系统），
+#    那份编码里没有 ✅ ✗ 这些符号，
+#    print("✅ 端到端测试") 直接抛 UnicodeEncodeError，
+#    整个测试一条都没跑就崩了。
+#
+#    实测（CI 日志）：
+#        print("\u2705 端到端测试：从拉下来到真能干活")
+#        → UnicodeEncodeError: 'charmap' codec can't encode characters
+#
+#    而 Ubuntu 上默认 UTF-8，所以那边一直是绿的。
+#
+#    改法：把 stdout/stderr 的 buffer 重新包一层 UTF-8，
+#    errors="replace" 兜底 —— 真写不出去也只会显示成 ?，不会拖死测试。
+#
+#    ⚠️ 必须放在 from __future__ 之后 ——
+#        Python 要求 __future__ 是文件里第一个语句。
+import io as _io
+import sys as _sys
+
+
+def _force_utf8() -> None:
+    for _name in ("stdout", "stderr"):
+        _s = getattr(_sys, _name, None)
+        if _s is None:
+            continue
+        _buf = getattr(_s, "buffer", None)
+        if _buf is None:
+            continue
+        try:
+            setattr(
+                _sys,
+                _name,
+                _io.TextIOWrapper(
+                    _buf, encoding="utf-8", errors="replace",
+                    line_buffering=True,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_force_utf8()
 
 import json
 import os
 import shutil
 import socket
 import subprocess
+import io
 import sys
 import time
 import urllib.error

@@ -32,6 +32,19 @@
 
 from __future__ import annotations
 
+# ⚠️ Windows CI 上 stdout 的默认编码是 cp1252（英文系统），
+#    里面没有 ✅ ✗ 这些符号，print 会直接抛 UnicodeEncodeError。
+#    实测：整个测试一条都没跑就崩了，而 Ubuntu 上一直是绿的。
+#
+#    下面这两行必须在任何 print 之前执行。
+try:
+    from tools.console import mark_utf8 as _mark_utf8
+except ImportError:
+    import os as _os0, sys as _sys0
+    _sys0.path.insert(0, _os0.path.dirname(_os0.path.dirname(_os0.path.abspath(__file__))))
+    from tools.console import mark_utf8 as _mark_utf8
+_mark_utf8()
+
 import argparse
 import json
 import os
