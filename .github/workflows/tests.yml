@@ -68,6 +68,38 @@ jobs:
       #
       #    现在失败时把最后 200 行写进 summary，网页上直接能看，
       #    不用 token、不用下载。
+      # ⚠️ 打环境信息。
+      #
+      #    2026-11-01 那次 Windows 两个版本都红了，
+      #    而我在本机复刻了三种环境（真实 / 假 APPDATA / 假 TEMP）都是绿的，
+      #    说明差在我造不出来的东西上 —— 最可能是 Windows Server 2022
+      #    跟 Windows 10/11 的差别。
+      #
+      #    这一版留着，下次再红能一眼看出环境差在哪。
+      - name: 环境信息
+        shell: bash
+        run: |
+          {
+            echo '## 环境'
+            echo ''
+            echo '```'
+            uname -a || true
+            echo "python: $(python -V 2>&1)"
+            echo "which python: $(which python)"
+            echo "os: $RUNNER_OS $RUNNER_ARCH"
+            echo "temp: ${TEMP:-unset}"
+            echo "appdata: ${APPDATA:-unset}"
+            echo "userprofile: ${USERPROFILE:-unset}"
+            echo "username: ${USERNAME:-unset}"
+            echo ''
+            echo '--- cmd /c echo hi ---'
+            cmd //c echo hi 2>&1 || true
+            echo '--- 版本 ---'
+            cat VERSION || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 失败时把失败的那几条名字打出来（日志拿不到，但名字能拿到）
       - name: 跑回归测试
         shell: bash
         run: |
