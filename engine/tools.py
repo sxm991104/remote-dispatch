@@ -578,6 +578,62 @@ def search_files(pattern: str, path: str = ".", glob_filter: str = "") -> str:
     return "\n".join(hits) + f"\n（共 {len(hits)} 处）"
 
 
+def _usable_temp() -> str:
+    """找一个能用的临时目录。
+
+    ⚠️ 为什么不能直接用 TEMP：
+
+        实测（GitHub 的 Windows runner）：
+        runner 用 bash（MINGW64）跑，$TEMP 被 MSYS 转成了 /tmp。
+        那是 POSIX 路径，Windows 上不存在。
+
+        于是 tempfile.mkstemp() 失败 → 写不出那个 .bat →
+        cmd 起不来 → 所有跑命令的测试全挂，
+        而报出来的是退出码 4294967295（= -1），用户看不懂。
+
+        同一份代码在 Ubuntu 上全过，在本机（TEMP 是 Windows 路径）也全过。
+
+    所以：先验证 TEMP 能不能用（建一个文件、删掉），
+          不行就退到 USERPROFILE\\AppData\\Local\\Temp，
+          再不行退到系统盘根下的一个子目录。
+    """
+    import tempfile as _tf
+
+    cands = []
+    t = os.environ.get("TEMP") or ""
+    if t:
+        cands.append(t)
+    t2 = os.environ.get("TMP") or ""
+    if t2:
+        cands.append(t2)
+    # 正规的 Windows 用户临时目录
+    up = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    if up:
+        cands.append(os.path.join(up, "AppData", "Local", "Temp"))
+    # 最后兜底：系统盘
+    sysdrive = os.environ.get("SystemDrive") or "C:"
+    cands.append(os.path.join(sysdrive + os.sep, "Windows", "Temp"))
+
+    for c in cands:
+        if not c:
+            continue
+        # POSIX 路径在 Windows 上不可能是有效目录
+        if os.name == "nt" and c.startswith("/"):
+            continue
+        try:
+            if not os.path.isdir(c):
+                os.makedirs(c, exist_ok=True)
+            # 真的能建能删吗
+            fd, probe = _tf.mkstemp(dir=c, prefix=".dsh_probe_")
+            os.close(fd)
+            os.remove(probe)
+            return c
+        except OSError:
+            continue
+
+    # 全都不行：交给系统自己挑（可能也失败，但至少不是我们硬塞的）
+    return _tf.gettempdir()
+
 def _run_on_windows(command: str, work_dir: str, env: dict, timeout: int):
     """Windows 上跑一条命令，用"写文件再执行"的方式保住中文。
 
@@ -617,7 +673,13 @@ def _run_on_windows(command: str, work_dir: str, env: dict, timeout: int):
             self._err = ""
 
     try:
-        fd, bat = tempfile.mkstemp(prefix="dshcmd_", suffix=".bat")
+        # ⚠️ 不用 tempfile.mkstemp() 的默认目录——
+        #    它看 TEMP，而 TEMP 可能是 /tmp 这种 POSIX 路径。
+        #    详见 _usable_temp 的说明。
+        _tdir = _usable_temp()
+        fd, bat = tempfile.mkstemp(
+            prefix="dshcmd_", suffix=".bat", dir=_tdir
+        )
         os.close(fd)
     except OSError as e:
         r = _Result()

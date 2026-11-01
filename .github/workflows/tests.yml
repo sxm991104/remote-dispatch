@@ -76,6 +76,33 @@ jobs:
       #    跟 Windows 10/11 的差别。
       #
       #    这一版留着，下次再红能一眼看出环境差在哪。
+      # ⚠️ 把 TEMP 改回 Windows 路径。
+      #
+      #    GitHub 的 Windows runner 用 bash（MINGW64）跑，
+      #    $TEMP 被 MSYS 转成了 /tmp —— 那是 POSIX 路径。
+      #
+      #    这个应用是 Windows 原生程序，它靠 TEMP 建临时 .bat 来跑命令：
+      #        tempfile.mkstemp()  →  拿到 /tmp/xxx.bat  →  失败
+      #        →  cmd 起不来  →  所有跑命令的测试全挂（退出码 4294967295）
+      #
+      #    实测（CI 截图）：temp 是 /tmp，Windows 上 11 条挂，Ubuntu 全过。
+      #    本机 TEMP 是 C:\Users\...\Temp，所以一直是绿的。
+      #
+      #    改法：用 runner 的 RUNNER_TEMP（GitHub 给的正规临时目录，
+      #    是 Windows 路径），写进 GITHUB_ENV 让后面的步骤都用它。
+      #
+      #    只在 Windows 上改；Ubuntu 上 /tmp 是正确的。
+      - name: 把 TEMP 改成 Windows 路径（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $t = $env:RUNNER_TEMP
+          if (-not $t) { $t = Join-Path $env:USERPROFILE 'AppData\Local\Temp' }
+          New-Item -ItemType Directory -Force -Path $t | Out-Null
+          "TEMP=$t"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$t"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "TEMP 改成 $t"
+
       - name: 环境信息
         shell: bash
         run: |
