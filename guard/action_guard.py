@@ -56,9 +56,10 @@ _ARBITRARY_EXEC = [
     #        → 不能要求 -c 后面必须有空格
     #     3. -m 跟模块   python -m os
     #        → 带 -m 就跑任意模块，一律拦（-m pytest 这类日常用法
-    #          也牺牲掉——写进异常清单里，见下面的 ALLOW）
+    #          也牺牲掉——写进白名单里，见 ALLOWED_M_MODULES）
     #     4. 变量拼接    pow%x%ershell
-    #        → 见下面的 EXPAND 逻辑
+    #        → 匹配前会先把 %userprofile% / $home 这类换成真实路径
+    #          （见第 900 行附近），不然换写法就绕过去了
 
     # 解释器 inline 执行
     #
@@ -73,14 +74,42 @@ _ARBITRARY_EXEC = [
     #
     # 原来的正则只认 "py -c"，中间插了版本号就匹配不上。
     # 现在允许 py 后面跟任意数量的 -N / -N.N。
-    (r"(python[0-9.]*|py)(\.exe)?(\s+-[0-9.]+)*\s+-c", "Python 内联执行"),
-    (r"(python[0-9.]*|py)(\.exe)?(\s+-[0-9.]+)*\s+-m\s", "Python 跑模块"),
+    # ⚠️ 解释器后面到 -c 之间可能是**任意开关**，不止版本号。
+    #
+    #    原来写的是 (\s+-[0-9.]+)*，只容忍 -3 这种纯数字。
+    #    实测放行（都能真执行）：
+    #        python -B -c "..."        （-B 开关）
+    #        python -I -c "..."
+    #        python -X utf8 -c "..."   （-X 带值，两个词）
+    #
+    #    现在允许开关和开关的值，但不允许跨过 ; & | 这些分隔符。
+    (r"(python[0-9.]*|py)(\.exe)?" + '(\\s+(-[\\w.-]+|--?[a-z][\\w-]*(=[^\\s;&|]*)?|\\d+)(\\s+[^\\s;&|]+(?=\\s+-[a-z]))?)*' + r"\s+-c",
+     "Python 内联执行"),
+    (r"(python[0-9.]*|py)(\.exe)?" + '(\\s+(-[\\w.-]+|--?[a-z][\\w-]*(=[^\\s;&|]*)?|\\d+)(\\s+[^\\s;&|]+(?=\\s+-[a-z]))?)*' + r"\s+-m",
+     "Python 跑模块"),
+    (r"\b(python[0-9.]*|py)(\.exe)?\s+-m[a-z]",
+     "Python 跑模块（-m 和模块名连写）"),
     (r"node(\.exe)?\s+(-e|--eval)", "Node 内联执行"),
-    (r"(ruby|perl|php|lua)(\.exe)?\s+(-e|--eval)", "其它解释器内联执行"),
+    (r"node(\.exe)?" + '(\\s+(-[\\w.-]+|--?[a-z][\\w-]*(=[^\\s;&|]*)?|\\d+)(\\s+[^\\s;&|]+(?=\\s+-[a-z]))?)*' + r"\s+(-e|--eval)",
+     "Node 内联执行"),
+    (r"(ruby|perl|php|lua)(\.exe)?" + '(\\s+(-[\\w.-]+|--?[a-z][\\w-]*(=[^\\s;&|]*)?|\\d+)(\\s+[^\\s;&|]+(?=\\s+-[a-z]))?)*' + r"\s+(-e|--eval)",
+     "其它解释器内联执行"),
     (r"(deno|bun)(\.exe)?\s+(run|eval)", "Deno/Bun 执行"),
 
     # PowerShell
-    (r"power(shell)?(\.exe)?", "PowerShell"),
+    # ⚠️ 原来是 (r"power(shell)?(\.exe)?", "PowerShell")。
+    #
+    #    两个毛病：
+    #      1. (shell)? 可选 → 单独一个 power 也算 PowerShell
+    #      2. 没有 \b → powerful / powerless 都中
+    #
+    #    实测误拦（都计入拦截次数，三次全站锁死）：
+    #        git commit -m "fix power button"
+    #        npm run powerful
+    #        dir C:\power
+    #
+    #    也就是：正常工作内容能把任务端锁死。
+    (r"\bpowershell(\.exe)?\b", "PowerShell"),
     (r"\bpwsh(\.exe)?", "PowerShell 7"),
     (r"\b(iex|invoke-expression)\b", "PowerShell 动态执行"),
     (r"-enc(odedcommand)?\s+[A-Za-z0-9+/=]{20,}", "编码执行"),
@@ -126,7 +155,13 @@ _ARBITRARY_EXEC = [
     (r"\b(wscript|cscript)\b", "Windows 脚本宿主"),
 
     # 往开机启动目录写东西 —— 持久化，重启后还在
-    (r"startup", "往开机启动目录写"),
+    # ⚠️ 原来是裸 "startup"，见到就拦，于是 cat startup.log 也被拦了。
+    #
+    #    真正要拦的是「往开机启动目录写」，特征是 startup 目录 + 写动作。
+    (r"programs?[\\/]start\s*menu[\\/]programs?[\\/]startup",
+     "往开机启动目录写"),
+    (r"\b(copy|move|xcopy|robocopy)\b.*startup", "往开机启动目录写"),
+    (r">+\s*\S*startup", "往开机启动目录写"),
 
     # 建链接 —— 红队测试打出来的 P0 缺陷。
     #

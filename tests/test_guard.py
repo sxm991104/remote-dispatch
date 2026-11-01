@@ -28,12 +28,28 @@ from guard import guard  # noqa: E402
 # ══════════════════════════════════════════════════════
 
 def _reset() -> None:
-    guard._state.pending.clear()
-    guard._state.locked_until.clear()
-    guard._state.fails.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。
+    # ⚠️ 还要清**共享状态文件**。
+    #
+    #    锁状态现在落盘了（%APPDATA%/dsh-bridge/lock_state.json），
+    #    为的是前台和桥两个进程看到同一份。
+    #
+    #    只清内存不清文件的话：
+    #        测试 A 锁了 → 写进文件
+    #        测试 B 清内存 → 下一次 _sync_from_disk() 又把锁读回来
+    #        → 测试互相污染，跑起来一半是假失败
+    try:
+        lp = os.path.join(
+            os.environ.get("APPDATA") or os.path.expanduser("~"),
+            "dsh-bridge",
+            "lock_state.json",
+        )
+        if os.path.exists(lp):
+            os.remove(lp)
+    except OSError:
+        pass
 
     # ⚠️ 还要清"今天被拦了几次"。
     #
@@ -176,7 +192,23 @@ def test_code_bound_to_task() -> None:
 # ══════════════════════════════════════════════════════
 
 def test_expired_code_locks() -> None:
-    """码过期之后仍然锁着，而且要锁 10 分钟。"""
+    """码过期之后锁上，而且**不会自己好**。
+
+    ⚠️ 断言改过。
+
+        原来期望"锁 580~600 秒，到点自动开"。
+
+        用户后来定的规则是：
+            「锁死十分钟后解锁，或者这个锁死直接锁死，
+              必须要验证码，不给验证码，那就什么都干不了。
+              十分钟对于普通用户来说完全不需要等，
+              我们只是给可能黑客攻击的行为锁了。」
+
+        所以现在的语义是"锁到验证通过为止"。
+
+        为什么这条重要：
+            时间锁对黑客是"稍等继续"的通行证，对普通用户毫无意义。
+    """
     danger = "删库"
     fp = _put(danger, "333333")
     guard._state.pending[fp].expires = time.time() - 1
@@ -184,7 +216,10 @@ def test_expired_code_locks() -> None:
     r = guard.check(danger)
     assert r["fenced"] is True
     assert r["waiting"] is False
-    assert 580 <= r["lock_left"] <= 600
+    # 锁着，而且是很久很久
+    assert r["lock_left"] > 86400 * 365, (
+        f"锁应该是长期的（到验证通过为止），实际 {r['lock_left']} 秒"
+    )
 
 
 def test_expired_can_resend() -> None:
@@ -299,33 +334,77 @@ def test_force_lock_blocks_everything() -> None:
 # F. 锁满 → 自动解
 # ══════════════════════════════════════════════════════
 
-def test_lock_expires_automatically() -> None:
-    """锁满 10 分钟自动解开。"""
+def test_lock_does_not_expire_automatically() -> None:
+    """锁**不会**自己好——必须验证码。
+
+    ⚠️ 这条原来是 test_lock_expires_automatically，测的是
+        "锁满 10 分钟自动解开"。现在规则改了，测反过来的事。
+
+    用户的原话：
+        「锁死十分钟后解锁，或者这个锁死直接锁死，
+          必须要验证码，不给验证码，那就什么都干不了。
+          用户肯定能有验证码，而黑客被锁在了外面，
+          前面我们还给黑客试错空间，现在直接不给了，
+          因为十分钟对于普通用户来说，完全不需要等啊。」
+
+    为什么这么定：
+        10 分钟对普通用户毫无意义（他本来就不会撞到 3 次），
+        对攻击者却是一张"稍等继续"的通行证。
+    """
     danger = "删库"
     fp = _put(danger, "121212")
     guard._state.pending[fp].expires = time.time() - 1
     guard.check(danger)                    # 触发转锁
 
-    # 手动把锁调到过去
-    guard._locked[fp] = time.time() - 1
+    # 锁是很久很久之后
+    assert guard._locked[fp] > time.time() + 86400 * 365, (
+        "过期之后锁应该是长期的"
+    )
 
+    # 就算过了很久（模拟），也还是不会自己开
     r = guard.check("无关任务")
-    assert r["fenced"] is False
-    assert r["can_resend"] is True
+    assert r["fenced"] is True, "锁不会自己好，应该还锁着"
+
+    # 用验证码才能开。
+    #
+    # ⚠️ 要**重新发一个码**：过期那个已经被删了（一次性）。
+    #    真实流程也是这样：
+    #        码过期 → 锁上 → 用户重新要一个 → 拿新码验
+    #    不是拿旧码。
+    fp2 = _put(danger, "121212")
+    ok, msg = guard.verify(danger, "121212")
+    assert ok is True, f"验证码应该能开锁：{msg}"
+
+    r2 = guard.check("无关任务")
+    assert r2["fenced"] is False, "验过之后应该开了"
 
 
-def test_force_lock_expires_automatically() -> None:
-    """强制锁也会自己满。"""
+def test_force_lock_does_not_expire() -> None:
+    """连错三次的强制锁，也**不会**自己好。
+
+    ⚠️ 原来是 test_force_lock_expires_automatically。
+
+    为什么更严：
+        连错三次大概率是有人在猜。
+        如果锁 10 分钟就开，他等一等就能继续猜——
+        6 位数字 10 万种，一天能猜很多轮。
+        现在锁到底，除非走重新验证。
+    """
     danger = "删库"
     fp = _put(danger, "131313")
     for _ in range(3):
         guard.verify(danger, "000000")
 
-    guard._force_locked[fp] = time.time() - 1
-    guard._state.locked_until.clear()
-
     r = guard.check("无关任务")
-    assert r["fenced"] is False
+    assert r["fenced"] is True
+    assert r["forced"] is True
+
+    # 就算硬把时间拨到过去，逻辑上也不该"自己好"
+    # （LOCK_FOREVER 是个大数，不会真的过去；
+    #   这里验证的是"不靠时间解，只靠验证解"）
+    assert guard._force_locked[fp] > time.time() + 86400 * 365, (
+        "强制锁应该是长期的"
+    )
 
 
 # ══════════════════════════════════════════════════════

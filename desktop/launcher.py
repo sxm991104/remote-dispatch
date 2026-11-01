@@ -55,7 +55,25 @@ _FLAGS = _NOWINDOW | _DETACHED | _NEWGROUP
 #   1. 从 %APPDATA%\dsh-bridge\config.json 读用户配置
 #   2. 没配过的，自动探测一次（查注册表 + 常见位置）
 #   3. 探测不到就留空，界面提示用户自己选
-from paths import get as _cfg_get, detect_all as _detect_all  # noqa: E402
+# ⚠️ 兼容两种导入方式。
+#
+#    当包用（import desktop.launcher）：
+#        desktop/ 的**父目录**在 sys.path 里 → 要用 desktop.paths
+#
+#    当单文件跑（python desktop/launcher.py，或者别人把 desktop/
+#    塞进 sys.path 再 import launcher）：
+#        → 要用 paths
+#
+#    原来只写了 `from paths import ...`，只有第二种能跑。
+#    单独 import desktop.launcher 会 ModuleNotFoundError，
+#    只是因为主入口恰好先垫了 sys.path 才没出事。
+#
+#    这个坑是"一个个模块单独 import"才炸出来的——
+#    从 app.py 正常启动永远发现不了。
+try:
+    from desktop.paths import get as _cfg_get, detect_all as _detect_all  # noqa: E402
+except ImportError:  # 单文件跑
+    from paths import get as _cfg_get, detect_all as _detect_all  # noqa: E402
 
 QQ_PORT = 3000
 ASTRBOT_PORT = 6185
@@ -324,7 +342,7 @@ class Launcher:
 
         AstrBot 是宿主，两条通道都要它。所以这里先确保它在跑。
         """
-        from . import channels as ch
+        from desktop import channels as ch
 
         self.last_error = ""
 
@@ -356,7 +374,7 @@ class Launcher:
         QQ 关了之后连客户端一起停——不然内存还是占着。
         飞书只断连接，不需要额外动作。
         """
-        from . import channels as ch
+        from desktop import channels as ch
 
         pid = "qq-napcat" if which == "qq" else "feishu"
         ch.disable(pid)
@@ -378,7 +396,7 @@ class Launcher:
 
     def channels_status(self) -> dict:
         """两条通道现在的状态，给界面显示。"""
-        from . import channels as ch
+        from desktop import channels as ch
 
         return ch.status()
 

@@ -42,7 +42,59 @@ from astrbot.api import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 
-BRIDGE_DIR = r"C:\Users\19836\Downloads\qqaibot-bridge"
+# ⚠️ 桥的目录。不能写死成本机的某个路径——
+#
+#    原来这里是 BRIDGE_DIR = r"C:\Users\<某人>\Downloads\qqaibot-bridge"，
+#    那是作者自己机器上的部署目录。
+#    别人 clone 下来，这条路不存在：
+#        bridge 插件 → 派活必然失败
+#        push/digest → 静默失效（_read_outbox 发现文件不在就返回空）
+#
+#    现在的顺序：
+#        1. 插件配置里填的 bridge_dir（最优先，用户可以自己指）
+#        2. 环境变量 DSH_BRIDGE_DIR
+#        3. 跟插件同级的几个常见位置
+#        4. 都找不到 → 用一个"明显不存在"的占位，让调用方在真正用的时候
+#           报一句清楚的错，而不是在 import 阶段就炸掉插件
+#
+#    为什么不在这里 raise：
+#        AstrBot 加载插件时抛异常，会把整个插件停用，
+#        连"改配置"的入口都进不去了。宁可晚一点报。
+
+
+def _guess_bridge_dir() -> str:
+    """按优先级找桥的目录。"""
+    # 1. 环境变量（部署脚本可以用它指定）
+    env = os.environ.get("DSH_BRIDGE_DIR", "").strip()
+    if env:
+        return env
+
+    # 2. 从插件自己的位置往上找
+    #    常见布局：
+    #        <桥目录>/plugins/astrbot_plugin_xxx/main.py
+    #        <AstrBot 数据目录>/plugins/astrbot_plugin_xxx/main.py
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.dirname(os.path.dirname(here))
+    if os.path.exists(os.path.join(cand, "core", "bridge.py")):
+        return cand
+
+    # 3. 几个常见位置（用户的下载目录、用户目录）
+    home = os.path.expanduser("~")
+    for rel in (
+        os.path.join("Downloads", "qqaibot-bridge"),
+        "qqaibot-bridge",
+        "remote-dispatch",
+    ):
+        p = os.path.join(home, rel)
+        if os.path.exists(os.path.join(p, "core", "bridge.py")):
+            return p
+
+    # 4. 找不到。返回一个占位——
+    #    调用方检查 os.path.exists 时会得到 False，
+    #    可以据此给出"去配置里填 bridge_dir"的提示。
+    return ""
+
+BRIDGE_DIR = _guess_bridge_dir()
 OUTBOX = os.path.join(BRIDGE_DIR, "outbox.jsonl")
 
 PLUGIN_NAME = "astrbot_plugin_dsh_digest"

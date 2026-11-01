@@ -95,6 +95,90 @@ def running_count(profile_id: str) -> int:
     return n
 
 
+# pending 最晚多久之内要变成 running。
+#
+# 为什么要有一个上限：
+#     pending 占并发位子是对的（不然并发控制形同虚设）。
+#     但如果 worker 起不来——崩溃、被杀、断电——
+#     它会永远停在 pending，也就永远占一个位子。
+#
+#     派满 N 个 → 后面全排队 → pump 找不到空位 → 永远排着。
+#     表现就是"活完全派不出去"，而且看不出原因。
+#
+#     实测：仓库里 3 条测试残留的 pending 把并发 3 那套占满，
+#     e2e 派的两条只拿到 queued，30 次轮询一直不动。
+PENDING_DEADLINE = 120      # 2 分钟还没起来 = 这条路断了
+QUEUED_DEADLINE = 1800      # 排队 30 分钟还没轮到 = 前面堵死了
+
+
+def reap_stuck(limit_pending: int = PENDING_DEADLINE,
+               limit_queued: int = QUEUED_DEADLINE) -> int:
+    """把卡死的 pending / queued 标成 error。返回处理了几条。
+
+    判定依据是**时间**，不是心跳——
+    这个阶段还没 worker 进程，没有心跳可看。
+
+    判死之后：
+        状态改成 error，原因写清楚
+        于是它不再占并发位子，后面的任务能跑起来
+    """
+    import datetime as _dt
+
+    now = _dt.datetime.now().astimezone()
+    changed = 0
+
+    for t in _read_tasks():
+        st = t.get("status")
+        if st not in ("pending", "queued"):
+            continue
+
+        # 从哪一刻开始算
+        stamp = t.get("created_at") or t.get("updated_at") or ""
+        try:
+            t0 = _dt.datetime.fromisoformat(str(stamp))
+            if t0.tzinfo is None:
+                t0 = t0.astimezone()
+        except (ValueError, TypeError):
+            continue
+
+        age = (now - t0).total_seconds()
+        limit = limit_pending if st == "pending" else limit_queued
+        if age <= limit:
+            continue
+
+        why = (
+            f"派下去 {int(age // 60)} 分钟了还没开始跑。"
+            "多半是 worker 起不来（崩溃、被杀、或者机器重启过）。"
+            "这条已经标成失败，不再占并发位子——重新派一次就行。"
+        )
+        try:
+            _update_task_by_id(
+                t.get("id") or "",
+                status="error",
+                error=why,
+                finished_at=now.isoformat(timespec="seconds"),
+            )
+            changed += 1
+        except Exception:  # noqa: BLE001
+            continue
+
+    return changed
+
+
+def _update_task_by_id(task_id: str, **fields) -> None:
+    """改一条任务。单独写一个，避免和 bridge 的循环依赖。
+
+    ⚠️ 不能在这里 import core.bridge——scheduler 是被它间接调用的，
+       顶层 import 会成环。所以延迟导入。
+    """
+    try:
+        from core import bridge
+
+        bridge._update_task(task_id, **fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def has_slot(profile_id: str, concurrency: int) -> bool:
     """这套还有没有空位。"""
     return running_count(profile_id) < max(1, concurrency)
@@ -120,7 +204,7 @@ def start_worker(task_id: str) -> None:
     flags = 0x08000000 | 0x00000008 if sys.platform == "win32" else 0
     try:
         subprocess.Popen(
-            [sys.executable, os.path.join(BRIDGE_DIR, "bridge.py"),
+            [sys.executable, os.path.join(BRIDGE_DIR, "core", "bridge.py"),
              "run", "--id", task_id, "--timeout", "1800"],
             cwd=BRIDGE_DIR,
             env=env,
@@ -139,6 +223,11 @@ def pump() -> int:
     从每套配置的队列里，按创建时间取最早的，
     空位有几个就拉几个。
     """
+
+
+    # 先把卡死的清掉——不然它们永远占着并发位子，
+    # 后面的任务排到天荒地老。
+    reap_stuck()
     import engine.profiles as P
 
     started = 0

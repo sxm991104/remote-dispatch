@@ -178,12 +178,59 @@ def is_allowed(path: str, level: str, workdir: str) -> bool:
     return False
 
 
+# 需要提权时，错误文本里固定出现的标记。
+#
+# 前台不用理解整段话，只要看到这四个字，就照"要验证码 → 提权 → 续同一个窗口"
+# 这套流程走。
+#
+# 为什么用方括号 + 固定字样：
+#     前台模型对"带括号的固定短语"很敏感，
+#     不容易被段落里的其他句子带偏。
+#     和 HTTP 的 401、Redis 的 -MOVED 是一个思路：
+#     机器读标记，人读文字。
+NEED_ESCALATE = "【需要提权】"
+
+
 def explain_denied(path: str, level: str) -> str:
-    """被权限挡住时说什么。"""
+    """被权限挡住时说什么。
+
+    ⚠️ 第一句就带 NEED_ESCALATE 标记。
+        前台的判断依据是这个标记，不是理解后面的段落。
+    """
     label = LEVEL_LABEL.get(level, level)
     hint = LEVEL_HINT.get(level, "")
+    nxt = next_level(level)
+    nxt_label = LEVEL_LABEL.get(nxt, nxt) if nxt else ""
+
+    if not nxt:
+        # 已经是最高档，这个位置就是碰不了。
+        # 这种不该说"需要提权"——提权也解决不了。
+        return (
+            f"这个位置碰不了（已经是最高权限了）：{path}\n"
+            f"当前权限：{label}——{hint}\n"
+            f"这多半是系统目录或者别的磁盘，不是提权能解决的。"
+        )
+
     return (
-        f"[权限不够] 这个文件不在「{label}」权限能碰的范围内：{path}\n"
+        f"{NEED_ESCALATE} 这个位置不在当前权限能碰的范围里：{path}\n"
         f"当前权限：{label}——{hint}\n"
-        f"要碰它的话，需要把这个窗口的权限提一档。"
+        f"提到「{nxt_label}」这一档就能碰。提权需要用户给验证码。"
     )
+
+
+def next_level(level: str) -> str:
+    """比当前档位高一档的那个。最高档返回空串。"""
+    order = list(LEVELS)
+    try:
+        i = order.index(level)
+    except ValueError:
+        return ""
+    return order[i + 1] if i + 1 < len(order) else ""
+
+
+def is_need_escalate(text: str) -> bool:
+    """这段错误是不是"需要提权"。
+
+    前台、桥、桌面端都用这一个判据，不要各写各的。
+    """
+    return NEED_ESCALATE in (text or "")

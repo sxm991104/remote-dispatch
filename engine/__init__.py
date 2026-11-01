@@ -23,10 +23,10 @@
     print(final_text(prog))
 """
 
-from .agent import Progress, final_text, run
-from .llm import LLM, LLMError, Reply, ToolCall, test_connection
-from .session import clear as clear_session
-from .session import estimate_tokens
+from engine.agent import Progress, final_text, run
+from engine.llm import LLM, LLMError, Reply, ToolCall, test_connection
+from engine.session import clear as clear_session
+from engine.session import estimate_tokens
 
 __all__ = [
     "LLM",

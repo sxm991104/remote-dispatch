@@ -50,20 +50,37 @@ from email.utils import formataddr
 # 给太长的窗口反而让"贼在旁边等着"有可乘之机。
 CODE_TTL = 120
 
-# 验证码过期之后，安全锁还要关多久（秒）。
+# ⚠️ 已废弃：锁不再自动过期。
 #
-# 为什么要有这一段：
-#    验证码过期只说明"这次没验证成"，不代表这个操作就不危险了。
-#    如果过期就直接放行，那攻击者只要拖到过期就能派活。
+#    这里原来写的是"验证码过期后再锁 10 分钟，锁满自动解"。
+#    那个设计给攻击者留了节奏：
+#        试 → 等十分钟 → 再试
+#    对普通用户却毫无意义（他本来就不会撞到 3 次）。
 #
-#    所以要再锁 10 分钟。锁满自动解（用户可能真的只是没看到邮件，
-#    不能让他被自己锁死）。
+#    用户的原话：
+#        「锁死十分钟后解锁，或者这个锁死直接锁死，
+#          必须要验证码，不给验证码，那就什么都干不了。
+#          用户肯定能有验证码，而黑客被锁在了外面。」
+#
+#    现在用 LOCK_FOREVER：锁到验证通过为止。
+#
+#    这个常量留着只是因为还有几处老代码引用它。
+#    新代码请用 LOCK_FOREVER。
 LOCK_AFTER_EXPIRE = 600
 
-# 最多猜几次
+# 锁到验证通过为止。
+#
+# 用一个很远的未来时间戳，而不是 None——
+# 因为一大堆地方是拿它跟 time.time() 比较大小，
+# 改成 None 会到处崩。用大数最省事，语义也对：
+# "到 9999 年才过期"等于"不会自己好"。
+LOCK_FOREVER = 4102444800.0     # 2100-01-01 00:00:00 UTC
+
+# 最多猜几次验证码
 MAX_TRIES = 3
 
-# 猜错了锁多久（秒）
+# ⚠️ 只剩 _state.locked_until 按"谁在猜"记的时候用到。
+#    真正决定"锁多久"的是 _force_locked[fp] = LOCK_FOREVER。
 LOCK_SECONDS = 600
 
 # 危险操作清单。
@@ -109,6 +126,19 @@ class State:
 
 _state = State()
 
+# 上次见到的重置令牌。
+#
+# reset_all() 会往 lock_state.json 写一个新的 _reset_token。
+# 别的进程 sync 时比较这个值——不一样就说明有人重置过，
+# 自己也要清空。
+#
+# 为什么用令牌而不是"磁盘是真相"：
+#    有些状态本来就该只在内存（比如测试注入的验证码），
+#    "磁盘是真相"会把它们冲掉，test_guard 挂了 16 条。
+# 为什么不干脆不管跨进程：
+#    实测撞到过——一个进程清了，另一个还一直在拦。
+_seen_reset_token: str = ""
+
 # 已经通过验证码的任务指纹。
 #
 # 为什么不复用 _state.pending：
@@ -124,8 +154,20 @@ _verified: dict[str, float] = {}
 
 
 def mark_verified(task: str) -> None:
-    """记下这个任务已经验过了。"""
-    _verified[_fingerprint(task)] = time.time() + 600
+    """记下这个任务已经验过了。
+
+    ⚠️ 原来只管 600 秒，过了又要重验。
+
+        用户的规则是「验证码拿到，数字清零」——
+        验过就是验过。
+
+        而且实际用起来 600 秒太短：锁死之后用户去翻邮箱、
+        填码，这中间经常超过十分钟，等于白验一次。
+
+        现在验过一直有效（进程重启后由共享状态文件带回来）。
+    """
+    _verified[_fingerprint(task)] = time.time() + 86400 * 30
+    _flush_to_disk()
 
 
 def is_verified(task: str) -> bool:
@@ -165,13 +207,242 @@ _locked: dict[str, float] = {}
 _force_locked: dict[str, float] = {}
 
 
+# ══════════════════════════════════════════════════════
+# 跨进程的锁状态
+#
+# 为什么要有这个
+#     上面几个字典都是**进程内存**。而这个程序有两个进程：
+#         AstrBot  跑前台（插件里 import guard）
+#         桥接口    跑任务端（server/api_server.py）
+#
+#     各有一份 → 前台锁了桥不知道，桥解了前台不知道。
+#
+#     实测撞到过：
+#         前台说「验证码超时了，还要锁约 10 分钟」
+#         桥那边 check() 返回 fenced=False，干干净净
+#         用户不知道该信哪个，我也不知道。
+#
+# 存哪
+#     %APPDATA%/dsh-bridge/lock_state.json
+#
+# 存什么
+#     {
+#       "locked":      {"<指纹>": 到什么时候, "_all": 全部锁},
+#       "force_locked": {"<指纹>": 到什么时候},
+#       "pending":     {"<指纹>": {code, task, purpose, expires}},
+#       "verified":    {"<指纹>": 什么时候验的}
+#     }
+#
+# ⚠️ 验证码明文存在这个文件里。
+#    本来验证码在内存里，进程一死就没了；现在落盘，重启还在。
+#    这是有意的——用户拿到码之后重启了程序，码应该还有效。
+#    文件权限靠 _restrict_to_me（跟 token 一样，只让当前用户读）。
+# ══════════════════════════════════════════════════════
+
+
+def _lock_path() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "dsh-bridge", "lock_state.json")
+
+
+def _load_state() -> dict:
+    """读共享锁状态。坏了就当空。"""
+    p = _lock_path()
+    try:
+        if os.path.exists(p):
+            d = json.loads(open(p, encoding="utf-8").read())
+            if isinstance(d, dict):
+                return d
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _save_state(d: dict) -> None:
+    """写共享锁状态。
+
+    ⚠️ 两个进程会同时写，所以：
+        1. 先写临时文件再 replace（原子，避免读到半个文件）
+        2. 失败就算了——不能让"存不了锁状态"把正常功能弄挂
+    """
+    p = _lock_path()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + f".tmp{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _merge_and_save(**parts) -> dict:
+    """把这次的变化并进共享状态，返回合并后的。
+
+    为什么要"读-改-写"而不是直接覆盖：
+        另一个进程可能刚写了别的东西。
+        每次只改自己那部分。
+    """
+    d = _load_state()
+    for k, v in parts.items():
+        d[k] = v
+    d["_saved_at"] = int(time.time())
+    _save_state(d)
+    return d
+
+
+# 把内存里的几个字典改成"跟共享状态同步"的读写。
+#
+# 为什么不干脆删掉内存字典：
+#    代码里到处在用（_state.pending、_locked……），
+#    全改一遍风险大。用一个薄薄的同步层更稳：
+#    每次读写都跟文件对一下。
+
+
+def _disk() -> dict:
+    """读共享状态。每次都读，文件很小。"""
+    return _load_state()
+
+
+def _sync_from_disk() -> None:
+    """把磁盘上"我没有"的东西补进来。
+
+    ⚠️ 这是**补缺**，不是"清空重建"。
+
+        清空重建会把内存里还没落盘的冲掉：
+            发码写好内存 → 另一次同步 → 码没了 → 用户永远验不过
+        实测撞到过好几次。
+
+        合并/判新旧也试过，太复杂、还引入了新 bug。
+
+        其实不需要判新旧：
+            验证码是发给同一个用户的，不会有"两边各有一个不同的码"。
+            内存里有就用内存的；内存里没有才去磁盘拿。
+
+    删除交给 expires 自然过期兜底，不做显式删。
+    """
+    d = _disk()
+    now = time.time()
+
+    # 先看有没有人重置过。
+    #
+    # 别的进程调了 reset_all() → 磁盘上的 _reset_token 变了。
+    # 这时候要把自己的内存全清掉，不然会一直用旧状态拦人。
+    tok = str(d.get("_reset_token") or "")
+    global _seen_reset_token
+    if tok and tok != _seen_reset_token:
+        _seen_reset_token = tok
+        _state.pending.clear()
+        _state.locked_until.clear()
+        _state.fails.clear()
+        _locked.clear()
+        _force_locked.clear()
+        _verified.clear()
+        return
+
+    for k, v in (d.get("locked") or {}).items():
+        if k in _locked:
+            continue
+        try:
+            until = float(v)
+        except (TypeError, ValueError):
+            continue
+        if until > now:
+            _locked[k] = until
+
+    for k, v in (d.get("force_locked") or {}).items():
+        if k in _force_locked:
+            continue
+        try:
+            until = float(v)
+        except (TypeError, ValueError):
+            continue
+        if until > now:
+            _force_locked[k] = until
+
+    for k, v in (d.get("verified") or {}).items():
+        if k in _verified:
+            continue
+        try:
+            until = float(v)
+        except (TypeError, ValueError):
+            continue
+        if until > now:
+            _verified[k] = until
+
+    for k, v in (d.get("pending") or {}).items():
+        if k in _state.pending:
+            continue
+        if not isinstance(v, dict):
+            continue
+        try:
+            exp = float(v.get("expires") or 0)
+        except (TypeError, ValueError):
+            continue
+        if exp > now:
+            _state.pending[k] = PendingCode(
+                code=str(v.get("code") or ""),
+                task=str(v.get("task") or ""),
+                purpose=str(v.get("purpose") or ""),
+                expires=exp,
+            )
+
+
+def _flush_to_disk() -> None:
+    """把内存里的状态写出去。
+
+    先读磁盘（保住别的进程写的东西），再把自己的并进去，
+    最后整体写回。
+
+    因为每次都是"读-改-写"，所以不会覆盖掉别人的。
+    并发写的最坏情况是丢一次更新——锁这种场景能接受，
+    下一次拦截/验证会再写一次。
+    """
+    now = time.time()
+    d = _disk()
+
+    d["locked"] = {k: v for k, v in _locked.items() if v > now}
+    d["force_locked"] = {k: v for k, v in _force_locked.items() if v > now}
+    d["verified"] = {k: v for k, v in _verified.items() if v > now}
+    d["pending"] = {
+        k: {
+            "code": v.code,
+            "task": v.task,
+            "purpose": v.purpose,
+            "expires": v.expires,
+        }
+        for k, v in _state.pending.items()
+        if v.expires > now
+    }
+    d["_saved_at"] = int(now)
+    _save_state(d)
+
+
 def _expire_pending(fp: str) -> None:
-    """一个验证码过期了：删掉它，开始锁。"""
+    """一个验证码过期了：删掉它，锁上。
+
+    ⚠️ 这里是这次改的重点之一。
+
+        原来：码过期 → 锁 10 分钟 → **时间到了自动开**
+
+        那等于给攻击者一个节奏：
+            试三次 → 等十分钟 → 再试三次 → ……
+        十分钟对普通用户毫无意义（他本来就不会撞到），
+        对攻击者却是一张"稍等继续"的通行证。
+
+        用户的原话：
+            「锁死十分钟后解锁，或者这个锁死直接锁死，
+              必须要验证码，不给验证码，那就什么都干不了。
+              用户肯定能有验证码，而黑客被锁在了外面。」
+
+        现在：码过期 → 锁上，**只有验证通过才开**。
+             没有"等一会儿自己好"这条路。
+    """
     p = _state.pending.pop(fp, None)
     if p is None:
         return
-    # 锁满自动解，不需要谁来删
-    _locked[fp] = time.time() + LOCK_AFTER_EXPIRE
+    # LOCK_FOREVER = 到验证通过为止
+    _locked[fp] = LOCK_FOREVER
 
 
 def lock_remaining(task: str) -> int:
@@ -191,6 +462,9 @@ def lock_remaining(task: str) -> int:
 
         现在两种锁取大的那个。
     """
+    # 先把别的进程可能改过的状态读进来
+    _sync_from_disk()
+
     fp = _fingerprint(task)
 
     # 先看看有没有过期的码要处理
@@ -261,13 +535,16 @@ def check(task: str) -> dict:
             简单做法：只要有任何任务处于围栏状态，就全站锁。
             因为围栏的语义是"系统可能被入侵了，先停下来"。
     """
+
+    # 先把别的进程改过的状态读进来（前台和桥是两个进程）
+    _sync_from_disk()
     # 先扫一遍，把过期的码转成锁
     for fp in list(_state.pending.keys()):
         p = _state.pending.get(fp)
         if p is not None and p.expires < time.time():
             _expire_pending(fp)
 
-    """任意一个任务在围栏里，全站锁。"""
+    # 任意一个任务在围栏里，全站锁。
     now = time.time()
     any_pending = any(p.expires >= now for p in _state.pending.values())
 
@@ -333,11 +610,46 @@ def check(task: str) -> dict:
         else:
             reason = "任务端被别的验证请求锁着"
 
-    fenced = bool(global_lock and not mine_verified)
+    # ⚠️ "计数锁死"也要算进 fenced。
+    #
+    #    原来 fenced 只看 global_lock（时间锁 / 强制锁），
+    #    不看"今天被拦满三次"。
+    #
+    #    后果实测：
+    #        计数文件里 count=3（真的锁死了）
+    #        /api/dispatch 回 blocked
+    #        但前台问 /api/guard/check → fenced=False → 它说"能派"
+    #    两边说的是两件事，用户被搞糊涂。
+    #
+    #    用户的原话：
+    #        「锁死我们要怎么解锁呢？这个肯定就要找前台了是吧？」
+    #    前台连"现在锁着"都看不到，当然没法带他走出来。
+    tripped = False
+    trip_count = 0
+    try:
+        from guard import guard_gate as _gg
+
+        _c = _gg.peek_count()
+        tripped = bool(_c.get("tripped"))
+        trip_count = int(_c.get("count") or 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+    if tripped and not reason:
+        reason = (
+            f"今天已经被拦了 {trip_count} 次，任务端锁死。\n"
+            "要重新用的话，得走验证码解锁。"
+        )
+
+    fenced = bool((global_lock or tripped) and not mine_verified)
 
     return {
         # fenced：派不出去（这是插件真正要看的）
         "fenced": fenced,
+        # tripped：是不是因为"今天被拦满三次"锁死的
+        # （跟其他锁区分开，方便前台说清楚该怎么解）
+        "tripped": tripped,
+        "trip_count": trip_count,
         # verified：能不能派。跟 fenced 相反，但语义更直白——
         # 没被围栏关着就是"可以派"，不管这个任务本身危不危险
         "verified": not fenced,
@@ -477,7 +789,8 @@ def _new_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def send_code_email(task: str, purpose: str = "") -> tuple[bool, str]:
+def send_code_email(task: str, purpose: str = "",
+                    config: dict | None = None) -> tuple[bool, str]:
     """发一个验证码到用户的邮箱。返回 (成功, 提示)。
 
     ⚠️ 这个函数**不把验证码返回给调用方**。
@@ -485,8 +798,22 @@ def send_code_email(task: str, purpose: str = "") -> tuple[bool, str]:
         那这个码就废了。
 
         验证码只走邮件这一条路。
+
+    config：传了就用它，不传就读已保存的。
+
+        ⚠️ 为什么要这个参数：
+            "填 → 测 → 存" 是正常顺序。用户填完就想先测一发。
+            但原来这里一进来就 load_config()，
+            读的是**上一次保存的**值。
+
+            结果：用户填了 163 邮箱，点「发封测试邮件」，
+            实际还在连 test@example.com——必然失败，
+            而他以为是自己填错了。
+
+            （踩过：用户填了半天，一直"发送失败"，
+              查了半小时才发现测试邮件压根没用他填的值。）
     """
-    c = load_config()
+    c = config if config is not None else load_config()
 
     # 服务器没填的话，从邮箱地址自动认一个
     if not c.get("smtp_host") and c.get("email"):
@@ -496,7 +823,11 @@ def send_code_email(task: str, purpose: str = "") -> tuple[bool, str]:
             c["smtp_port"] = p_
             save_config(c)
 
-    if not is_guard_ready():
+    if config is not None:
+        # 用传进来的值判断，不看已保存的那份
+        if not (c.get("email") and c.get("smtp_host") and c.get("smtp_pass")):
+            return False, "邮箱 / 发信服务器 / 授权码 三样都得填"
+    elif not is_guard_ready():
         return False, "还没配安全邮箱"
 
     fp = _fingerprint(task)
@@ -514,12 +845,14 @@ def send_code_email(task: str, purpose: str = "") -> tuple[bool, str]:
         _force_locked.pop(fp, None)
 
     code = _new_code()
+    _sync_from_disk()
     _state.pending[fp] = PendingCode(
         code=code,
         task=task,
         purpose=purpose,
         expires=time.time() + CODE_TTL,
     )
+    _flush_to_disk()
 
     subject = "【危险操作验证码】"
     body = (
@@ -577,11 +910,123 @@ def _mask_email(addr: str) -> str:
     return f"{name[:2]}***@{domain}"
 
 
+# 「解锁任务端」这件事的固定目标名。
+#
+# 为什么需要：
+#     锁死时发的码，pending 是按 task 的指纹存的。
+#     而用户验证时传的 task 跟他当时说的那句话有关，
+#     两边对不上 → 码永远验不过 → 环境真的死了。
+#
+#     实测确认：锁死发的码记在 "任务端锁死后的解锁" 的指纹上，
+#     而前台验的时候传的是具体任务，指纹不同。
+#
+# 所以「解锁任务端」用这个固定的目标，不跟任何具体任务绑定。
+UNLOCK_TARGET = "__unlock__"
+
+
+def unlock_with_code(code: str) -> tuple[bool, str]:
+    """用验证码解锁整个任务端。
+
+    跟 verify(task, code) 的区别：
+        verify        绑定某一件具体的活
+        unlock_with_code  专门解锁"任务端锁死"这个状态
+
+    成功之后：所有锁清空 + 拦截计数清零。
+    """
+    ok, msg = verify(UNLOCK_TARGET, code)
+    if not ok:
+        return False, msg
+
+    # 验过了：把所有锁都清掉
+    _locked.clear()
+    _force_locked.clear()
+    _state.locked_until.clear()
+    _state.pending.pop(_fingerprint(UNLOCK_TARGET), None)
+
+    # 拦截计数也清零——"验证码拿到，数字清零"
+    try:
+        from guard import guard_gate as _gg
+
+        _gg.reset_after_pass()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 清掉"这次锁死发过码"的标记，下次锁死能重新发
+    try:
+        d = _load_state()
+        d.pop("_trip_code_at", None)
+        _save_state(d)
+    except Exception:  # noqa: BLE001
+        pass
+
+    _flush_to_disk()
+    return True, "解锁了，任务端可以正常派活了。"
+
+def reset_all() -> None:
+    """把所有安全状态清干净：内存 + 磁盘 + 拦截计数。
+
+    ⚠️ 为什么要有这个函数：
+
+        状态现在分三处放：
+            内存里的几个字典
+            %APPDATA%/dsh-bridge/lock_state.json   （跨进程共享）
+            拦截计数（count_store 自己管一个文件）
+
+        每加一个新的状态文件，所有"清理点"都得跟着改一遍。
+        实测漏了一次：
+            test_stress.py 清了内存，没清 lock_state.json，
+            于是 check() 一同步又读回来 → 测试从第 100 轮开始失败。
+
+        测试之间互相污染只是表象，根子是**没有单一入口**。
+
+        现在一条线清干净，谁要清就调这个。
+    """
+    # 一、内存
+    _state.pending.clear()
+    _state.locked_until.clear()
+    _state.fails.clear()
+    _locked.clear()
+    _force_locked.clear()
+    _verified.clear()
+
+    # 二、磁盘上的共享状态
+    #
+    #    不删文件，改成写一个新令牌——
+    #    别的进程 sync 时看到令牌变了就会自己清空。
+    #    直接删文件的话，别的进程根本不知道发生过什么。
+    global _seen_reset_token
+    import secrets as _secrets
+
+    tok = _secrets.token_urlsafe(8)
+    _seen_reset_token = tok
+    try:
+        _save_state({
+            "locked": {},
+            "force_locked": {},
+            "verified": {},
+            "pending": {},
+            "_reset_token": tok,
+            "_saved_at": int(time.time()),
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 三、拦截计数
+    try:
+        from guard import guard_gate as _gg
+
+        _gg.reset_after_pass()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def verify(task: str, code: str, who: str = "") -> tuple[bool, str]:
     """验码。返回 (通过, 提示)。
 
     who 用来记录失败次数，防止暴力猜。
     """
+
+    _sync_from_disk()
     now = time.time()
 
     # 锁了吗
@@ -596,26 +1041,29 @@ def verify(task: str, code: str, who: str = "") -> tuple[bool, str]:
         return False, "没有待验证的操作（可能过期了，重新发起一次）"
 
     if p.expires < now:
-        # ⚠️ 这里原来只删 pending，**没有上锁**。
+        # 码过期了：删掉它，然后**锁住**。
         #
-        #    红队 G 组打出来的：
-        #        注入一个过期码 → verify 返回"过期了" → 删掉 pending
-        #        → lock_remaining 返回 0（没锁）
+        # 这里踩过两次坑，都是"两处逻辑不一致"：
         #
-        #    而同一个文件里 _expire_pending() 做的事是：
-        #        删 pending + 锁 LOCK_AFTER_EXPIRE
+        #   坑一（红队 G 组）：
+        #       这里原来只删 pending、没上锁，而 _expire_pending()
+        #       同一步是"删 + 锁"。于是走 verify 这条路过期不锁，
+        #       等于码一过期马上就能要新的——攻击者可以让码不停过期、
+        #       不停重发，每次重发都是一次猜的机会。
         #
-        #    两处逻辑不一致。设计意图很清楚（LOCK_AFTER_EXPIRE
-        #    这个常量的存在就说明了）：过期之后要锁一段时间，
-        #    不让立刻重发。
+        #   坑二（锁多久）：
+        #       修坑一的时候照着 _expire_pending 锁了 10 分钟。
+        #       后来规则改成"锁到验证通过为止"，两处又不一样了。
+        #       现在两边都是 LOCK_FOREVER。
         #
-        #    实测：走 verify 这条路过期不锁，等于"码过期了马上就能
-        #    要一个新的"——攻击者可以让码不停过期、不停重发，
-        #    每一次重发都是一次新的猜测机会。
-        #
-        #    现在跟 _expire_pending 对齐。
+        # 为什么是 LOCK_FOREVER 而不是 10 分钟：
+        #   10 分钟对攻击者是"稍等继续"，对普通用户毫无意义
+        #   （他本来就不会把码拖到过期）。用户的原话：
+        #       「锁死十分钟后解锁，或者这个锁死直接锁死，
+        #         必须要验证码，不给验证码，那就什么都干不了。」
         _state.pending.pop(fp, None)
-        _locked[fp] = now + LOCK_AFTER_EXPIRE
+        _locked[fp] = LOCK_FOREVER
+        _flush_to_disk()
         return False, "验证码过期了"
 
     if p.tries >= MAX_TRIES:
@@ -638,22 +1086,58 @@ def verify(task: str, code: str, who: str = "") -> tuple[bool, str]:
             # 等于让他在十分钟里试 10 万种组合。
             _state.pending.pop(fp, None)
             _state.locked_until[who or "_"] = now + LOCK_SECONDS
-            _force_locked[fp] = now + LOCK_SECONDS
+            # ⚠️ 连错三次 = 有人在猜的可能性很高。
+            #    原来锁 10 分钟，等于给他十分钟后再猜的机会。
+            #    现在锁到"重新验证通过"为止。
+            _force_locked[fp] = LOCK_FOREVER
+            _flush_to_disk()
             return False, (
-                f"验证码连错 {MAX_TRIES} 次，锁 {LOCK_SECONDS // 60} 分钟。\n"
-                f"这段时间里不能重新获取验证码——"
-                f"这是为了防止有人猜。"
+                f"验证码连错 {MAX_TRIES} 次，锁死了。\n"
+                f"要重新获取验证码，得先在桌面端「危险操作验证」里"
+                f"走一次重新验证。\n"
+                f"这条锁不会自己过期——就是为了防有人猜。"
             )
         return False, f"验证码不对（还能试 {left} 次）"
 
     # 通过：一次性，立刻作废；同时记下"这个任务允许执行了"
     _state.pending.pop(fp, None)
+
+    # ⚠️ 把所有的锁都清掉，包括共享文件里的。
+    #
+    #    用户的规则：「验证码拿到，数字清零」。
+    #
+    #    原来只 pop 了 pending。而 _locked / _force_locked 还在，
+    #    于是"验证通过"之后任务端还是锁着——
+    #    用户会觉得"我明明验了怎么还不行"。
+    #
+    #    锁死有三条来源：
+    #        _locked[fp]        码过期了
+    #        _force_locked[fp]  连错三次
+    #        _force_locked["_all"]  全局锁死
+    #    验证通过要把这三条都清掉。
+    _locked.pop(fp, None)
+    _force_locked.pop(fp, None)
+    _force_locked.pop("_all", None)
+    _state.locked_until.clear()
+    _state.fails.clear()
+
     mark_verified(task)
+
+    # 顺手把计数也清零——"验证码拿到，数字清零"
+    try:
+        from guard import guard_gate as _gg
+
+        _gg.reset_after_pass()
+    except Exception:  # noqa: BLE001
+        pass
+
+    _flush_to_disk()
     return True, "验证通过"
 
 
 def has_pending(task: str) -> bool:
     """这个任务有没有正在等验证的码。"""
+    _sync_from_disk()
     p = _state.pending.get(_fingerprint(task))
     if p is None:
         return False

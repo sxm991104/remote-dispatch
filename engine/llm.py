@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
-from .ratelimit import RateLimiter
+from engine.ratelimit import RateLimiter
 
 
 class LLMError(Exception):

@@ -599,7 +599,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, b'{"error":"name is required"}')
             try:
                 rec = bridge.cmd_dispatch(msg, name)
-                self._spawn(name)
+                # ⚠️ 被拦下的不要起 worker（原来无条件 spawn）。
+
+                if rec.get("status") != "blocked":
+                    self._spawn(name)
                 st, b = _json(rec)
             except Exception as e:  # noqa: BLE001
                 st, b = _json({"error": f"{type(e).__name__}: {e}"}, 500)
@@ -651,9 +654,44 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from guard import guard
 
+                # ⚠️ 用**界面上填的**值发测试邮件，不用已保存的那份。
+                #
+                #    正常的顺序是"填 → 测 → 存"。
+                #    但 send_code_email 原来一进来就 load_config()，
+                #    读的是上一次保存的值——用户填了半天，
+                #    测的却是旧配置，必然失败。
+                #
+                #    所以这里把界面上的值拼一份传进去。
+                cur = guard.load_config()
+                test_cfg = dict(cur)
+
+                for k in ("email", "smtp_host", "smtp_user"):
+                    v = self._str_field(body, k)
+                    if v:
+                        test_cfg[k] = v.strip()
+
+                port = body.get("smtp_port")
+                if isinstance(port, (int, str)) and str(port).strip():
+                    try:
+                        test_cfg["smtp_port"] = int(port)
+                    except (TypeError, ValueError):
+                        pass
+
+                pw = self._str_field(body, "smtp_pass")
+                if pw and pw.strip():
+                    test_cfg["smtp_pass"] = pw.strip()
+
+                # 服务器没填就按邮箱域名推一个
+                if not test_cfg.get("smtp_host") and test_cfg.get("email"):
+                    h, p_ = guard.detect_smtp(test_cfg["email"])
+                    if h:
+                        test_cfg["smtp_host"] = h
+                        test_cfg["smtp_port"] = p_
+
                 ok, msg = guard.send_code_email(
                     "这是一封测试邮件，不需要做任何事",
                     purpose="测试安全邮箱能不能收到",
+                    config=test_cfg,
                 )
                 return self._send(*_json({"ok": ok, "message": msg}))
             except Exception as e:  # noqa: BLE001
@@ -708,6 +746,49 @@ class Handler(BaseHTTPRequestHandler):
             #     （那才是真后门）
             try:
                 return self._send(*_json(self._guard_selftest()))
+            except Exception as e:  # noqa: BLE001
+                return self._send(*_json({"ok": False, "error": str(e)}, 500))
+
+        if path == "/api/guard/unlock":
+            # 专门解锁"任务端锁死"，不需要 task。
+            #
+            # ⚠️ 为什么要单独一个接口：
+            #
+            #     锁死时发的码，pending 记在一个固定目标上
+            #     （guard.UNLOCK_TARGET），不跟具体任务绑定。
+            #
+            #     而 /api/guard/verify 要传 task，指纹对不上 →
+            #     用户收得到码、填进去却永远验不过。
+            #
+            #     实测确认过这个断链：锁死的码是废的，
+            #     用户没有任何办法自己解锁。
+            try:
+                from guard import guard
+
+                code = self._str_field(body, "code").strip()
+                if not code:
+                    return self._send(400, b'{"ok":false,"error":"code is required"}')
+                ok, msg = guard.unlock_with_code(code)
+
+                if ok:
+                    # ⚠️ 解锁之后，把扣着的删除真的做掉。
+                    #
+                    #    沙箱拦下的删除只记了"该删哪些"，
+                    #    等用户验证码点头才真删。
+                    #    原来 commit_pending_deletes 零调用 ——
+                    #    用户给了码，那批删除永远不执行。
+                    #
+                    #    现在接在这里：解锁 = 用户点头。
+                    try:
+                        from engine import tools as _tools
+
+                        _res = _tools.commit_pending_deletes()
+                        if _res:
+                            msg += f"\n（另外把 {len(_res)} 个待确认的删除做掉了。）"
+                    except Exception as _e:  # noqa: BLE001
+                        msg += f"\n（待确认的删除没做完：{type(_e).__name__}）"
+
+                return self._send(*_json({"ok": ok, "message": msg}))
             except Exception as e:  # noqa: BLE001
                 return self._send(*_json({"ok": False, "error": str(e)}, 500))
 
@@ -930,6 +1011,25 @@ class Handler(BaseHTTPRequestHandler):
         has_room = S.has_slot(pid, limit) if pid else True
 
         rec = bridge.cmd_dispatch(task, name, pid)
+
+        # ⚠️ 被安全闸拦下的，**在这里就要收手**。
+        #
+        #    原来不看 rec 是什么状态，直接按 has_room 决定起不起 worker：
+        #        rec = cmd_dispatch(...)   ← 被拦，返回 blocked
+        #        if has_room:
+        #            self._spawn(name)     ← 照样起
+        #
+        #    而且 cmd_dispatch 被拦时**不写任务表**，
+        #    于是 worker 起来去表里找 → 找不到 → 推一条"没跑成"。
+        #
+        #    用户看到的：
+        #        [锁死测试_xxx] 没跑成：找不到这个任务
+        #    实际发生的：被安全闸拦住了。
+        #    两回事被说成了最让人困惑的那种。
+        #
+        #    实测（用户飞书截图）：锁死之后派一条，收到"找不到这个任务"。
+        if rec.get("status") == "blocked" or rec.get("blocked"):
+            return rec
 
         if has_room:
             self._spawn(name)
@@ -1878,7 +1978,7 @@ class Handler(BaseHTTPRequestHandler):
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         try:
             subprocess.Popen(
-                [sys.executable, os.path.join(BRIDGE_DIR, "bridge.py"),
+                [sys.executable, os.path.join(BRIDGE_DIR, "core", "bridge.py"),
                  "run", "--id", name, "--timeout", "1800"],
                 cwd=BRIDGE_DIR, env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

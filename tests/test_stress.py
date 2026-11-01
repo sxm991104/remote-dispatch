@@ -118,13 +118,9 @@ def test_concurrent_verify_attack() -> None:
     10 个线程同时猜，每线程猜 100 次。
     必须：只有 3 次能真正"试"，之后就锁死。
     """
-    guard._state.pending.clear()
-    guard._state.locked_until.clear()
-    guard._state.fails.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
-
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。
     task = "压力测试任务"
     fp = guard._fingerprint(task)
     guard._state.pending[fp] = guard.PendingCode(
@@ -161,21 +157,14 @@ def test_concurrent_verify_attack() -> None:
     assert r["fenced"] is True
 
     # 清理
-    guard._state.pending.clear()
-    guard._state.locked_until.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
-
-
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。
 def test_concurrent_check_doesnt_corrupt() -> None:
     """大量并发 check，状态不能被搞乱。"""
-    guard._state.pending.clear()
-    guard._state.locked_until.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
-
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。
     task = "并发检查"
     fp = guard._fingerprint(task)
     guard._state.pending[fp] = guard.PendingCode(
@@ -201,12 +190,9 @@ def test_concurrent_check_doesnt_corrupt() -> None:
 
     assert not errors, f"并发 check 崩了：{errors[:3]}"
 
-    guard._state.pending.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
-
-
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。
 # ══════════════════════════════════════════════════════
 # 压力 3：超大输入
 # ══════════════════════════════════════════════════════
@@ -251,12 +237,9 @@ def test_many_pending_codes() -> None:
 
     assert elapsed < 3.0, f"1000 个 pending 时 check 太慢：{elapsed:.1f}s"
 
-    guard._state.pending.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
-
-
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。
 # ══════════════════════════════════════════════════════
 # 压力 4：文件系统
 # ══════════════════════════════════════════════════════
@@ -312,12 +295,9 @@ def test_deep_directory_tree() -> None:
 
 def test_rapid_send_verify_cycles() -> None:
     """快速来回：发码→验证→发码→验证，来回 100 次不能乱。"""
-    guard._state.pending.clear()
-    guard._state.locked_until.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
-
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。
     task = "快速循环"
     for i in range(100):
         fp = guard._fingerprint(task)
@@ -332,7 +312,6 @@ def test_rapid_send_verify_cycles() -> None:
     r = guard.check("无关")
     assert r["fenced"] is False
 
-    guard._state.pending.clear()
-    guard._locked.clear()
-    guard._force_locked.clear()
-    guard._verified.clear()
+    guard.reset_all()
+    # reset_all 会一起清内存、共享状态文件、拦截计数。
+    # 以前每个测试自己列 clear()，加新状态时必然漏一处。

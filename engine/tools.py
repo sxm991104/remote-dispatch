@@ -234,6 +234,42 @@ def _resolve(path: str) -> str:
     return p
 
 
+# 命令最短给多少秒。
+#
+# 为什么不直接用用户要的值：
+#     起 cmd、写 .bat、chcp、call、读输出、等影子落盘……
+#     这一套本身就要一两秒。
+#     用户传 1 秒的话，连 echo hi 都会"超时"，等于没法用。
+#
+#     所以 5 秒是"最小可执行时间"，不是故意拖慢。
+#     但返回的话里要把实际值说出来——
+#     用户说 3 秒、实际限 5 秒，不说明白就是"说的时间不是做的时间"。
+MIN_TIMEOUT = 5
+MAX_TIMEOUT = 600
+
+
+def _timeout_msg(command: str, want: int) -> str:
+    """超时了怎么告诉用户。
+
+    ⚠️ 要把"实际用的秒数"说出来。
+
+        用户说 3 秒，程序按 5 秒跑的（最小可执行时间）。
+        只回"命令超时（3 秒）"的话，用户以为程序乱来。
+        说清楚是"最少 5 秒"，他才知道规矩是什么。
+    """
+    used = _effective_timeout(want)
+    if used == int(want or 0):
+        return f"命令超时（{used} 秒）被中止：{command}"
+    return (
+        f"命令超时（{used} 秒）被中止：{command}\n"
+        f"（你要的是 {want} 秒，最短按 {MIN_TIMEOUT} 秒算——"
+        f"起 cmd 和读输出本身要时间，给太少的话连 echo 都会超时。）"
+    )
+
+def _effective_timeout(want: int) -> int:
+    """用户要的秒数 → 实际会用的秒数。"""
+    return max(MIN_TIMEOUT, min(int(want or 0), MAX_TIMEOUT))
+
 def _nowindow_flags() -> int:
     return 0x08000000 if sys.platform == "win32" else 0
 
@@ -347,40 +383,40 @@ def _decode_output(raw) -> str:
     #    这里两种都得吃。
     if isinstance(raw, str):
         return raw
-    """把子进程的输出字节变成文字。
-
-    ⚠️ 这里踩过一个很隐蔽的坑，值得写清楚。
-
-        现象：`echo 中文测试` 出来是 `���Ĳ���`。
-
-        排查过程：
-            · 直接跑 subprocess.run(["cmd","/c","echo 中文"]) → 正确
-            · 通过 run_command 跑 → 乱码
-            · 对比参数，差在 creationflags
-            · 带 CREATE_NO_WINDOW → 子进程输出 GBK 字节
-              不带                 → 输出 UTF-8 字节
-
-        为什么加了 CREATE_NO_WINDOW 就变成 GBK：
-            cmd.exe 的输出编码跟着控制台的代码页走。
-            带 CREATE_NO_WINDOW 时不继承父进程的控制台，
-            自己起一个默认代码页 936（简体中文 GBK）。
-            不带时继承了父进程的（我们设了 UTF-8）。
-
-        试过但不可靠的做法：
-            · 统一按 UTF-8 解 → 带 creationflags 时乱码
-            · 统一按 GBK 解   → 不带时乱码
-            · 强制给子进程设 PYTHONIOENCODING → 只管 Python 子进程，
-              cmd.exe 不吃这个变量
-
-        最终做法：**先试 UTF-8，失败再用 GBK**。
-
-            UTF-8 的字节序列有很强的校验性——中文乱码成 GBK
-            很难恰好是合法 UTF-8。所以"严格试 UTF-8"是可靠的判据。
-
-            实测两种都能正确解：
-                UTF-8 字节 → 严格解码成功 → 对
-                GBK 字节   → 严格解码抛异常 → 转 GBK → 对
-    """
+    # 把子进程的输出字节变成文字。
+#
+    # ⚠️ 这里踩过一个很隐蔽的坑，值得写清楚。
+#
+        # 现象：`echo 中文测试` 出来是 `���Ĳ���`。
+#
+        # 排查过程：
+            # · 直接跑 subprocess.run(["cmd","/c","echo 中文"]) → 正确
+            # · 通过 run_command 跑 → 乱码
+            # · 对比参数，差在 creationflags
+            # · 带 CREATE_NO_WINDOW → 子进程输出 GBK 字节
+              # 不带                 → 输出 UTF-8 字节
+#
+        # 为什么加了 CREATE_NO_WINDOW 就变成 GBK：
+            # cmd.exe 的输出编码跟着控制台的代码页走。
+            # 带 CREATE_NO_WINDOW 时不继承父进程的控制台，
+            # 自己起一个默认代码页 936（简体中文 GBK）。
+            # 不带时继承了父进程的（我们设了 UTF-8）。
+#
+        # 试过但不可靠的做法：
+            # · 统一按 UTF-8 解 → 带 creationflags 时乱码
+            # · 统一按 GBK 解   → 不带时乱码
+            # · 强制给子进程设 PYTHONIOENCODING → 只管 Python 子进程，
+              # cmd.exe 不吃这个变量
+#
+        # 最终做法：**先试 UTF-8，失败再用 GBK**。
+#
+            # UTF-8 的字节序列有很强的校验性——中文乱码成 GBK
+            # 很难恰好是合法 UTF-8。所以"严格试 UTF-8"是可靠的判据。
+#
+            # 实测两种都能正确解：
+                # UTF-8 字节 → 严格解码成功 → 对
+                # GBK 字节   → 严格解码抛异常 → 转 GBK → 对
+    #
     if not raw:
         return ""
 
@@ -601,7 +637,7 @@ def _run_on_windows(command: str, work_dir: str, env: dict, timeout: int):
                 cwd=work_dir,
                 env=env,
                 capture_output=True,
-                timeout=max(5, min(timeout, 600)),
+                timeout=_effective_timeout(timeout),
                 creationflags=_nowindow_flags(),
             )
         except subprocess.TimeoutExpired:
@@ -689,23 +725,173 @@ def sandbox_status() -> str:
         return f"影子执行：探测失败（{type(e).__name__}）"
 
 
+# 被扣下的删除，落盘存一份。
+#
+# 为什么不能只放内存：
+#     它生成时在 worker 进程里，而"用户给了验证码、该真删了"
+#     发生在另一个进程（桥接口或前台）。
+#     worker 跑完就退，内存里的记录跟着没了 ——
+#     于是 commit_pending_deletes 调了也没东西可删。
+#
+#     实测：全仓 grep commit_pending_deletes，除定义外零调用。
+#     不是忘了调，是调了也空。
+def _pending_path() -> str:
+    """扣下的删除存哪。跟 bridge 的 state 目录放一起。"""
+    import os as _os
+
+    base = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    d = _os.path.join(base, "state")
+    try:
+        _os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return _os.path.join(d, "pending_deletes.json")
+
+
+def _load_pending() -> dict:
+    import json as _json
+
+    p = _pending_path()
+    try:
+        import os as _os
+
+        if _os.path.exists(p):
+            d = _json.loads(open(p, encoding="utf-8").read())
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_pending(d: dict) -> None:
+    import json as _json
+    import os as _os
+    import tempfile as _tf
+
+    p = _pending_path()
+    try:
+        fd, tmp = _tf.mkstemp(dir=_os.path.dirname(p), suffix=".tmp")
+        _os.close(fd)
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(d, f, ensure_ascii=False)
+        _os.replace(tmp, p)
+    except OSError:
+        try:
+            _os.remove(tmp)  # type: ignore[possibly-undefined]
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _remember_pending(files: list[str], task_id: str = "") -> None:
+    """把这次扣下的删除记到盘上。"""
+    if not files:
+        return
+    d = _load_pending()
+    key = task_id or "_"
+    cur = d.get(key) or {}
+    got = list(cur.get("files") or [])
+    for f in files:
+        if f not in got:
+            got.append(f)
+    import datetime as _dt
+
+    d[key] = {
+        "files": got,
+        "at": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    _save_pending(d)
+
+
+def pending_deletes(task_id: str = "") -> list[str]:
+    """还没确认的删除。
+
+    ⚠️ 现在从盘上读，不再只看内存。
+        内存那份是给"同一个进程里连着跑几条命令"用的，
+        盘上那份是给"用户给了码、另一个进程要真删"用的。
+    """
+    d = _load_pending()
+    if task_id:
+        return list((d.get(task_id) or {}).get("files") or [])
+    out: list[str] = []
+    for v in d.values():
+        for f in (v or {}).get("files") or []:
+            if f not in out:
+                out.append(f)
+    return out
+
+
 def pending_deletes() -> list[str]:
     """还没确认的删除。"""
     return list(_PENDING_DELETES)
 
 
-def commit_pending_deletes() -> list:
-    """把扣着的删除真执行掉。验证码通过之后调。"""
-    global _PENDING_DELETES
-    if not _PENDING_DELETES:
-        return []
-    try:
-        from guard import sandbox as _sb
+def commit_pending_deletes(task_id: str = "") -> list:
+    """把扣着的删除真执行掉。验证码通过之后调。
 
-        res = _sb.commit_deferred(_PENDING_DELETES)
-    except ImportError:
-        res = []
+    ⚠️ 现在从**盘上**读，不只看内存。
+
+        原因：这些删除是 worker 进程扣下的，
+        而验证码通过发生在另一个进程。
+        原来只读模块级 _PENDING_DELETES —— 那个进程早退了，
+        所以 commit 永远删不到东西。
+
+    task_id 传空 = 把所有任务扣着的都删。
+
+    返回 sandbox.commit_deferred 的结果（成功/失败的清单）。
+    """
+    global _PENDING_DELETES
+
+    from_disk = pending_deletes(task_id)
+    targets: list[str] = []
+    for f in list(_PENDING_DELETES) + from_disk:
+        if f not in targets:
+            targets.append(f)
+
+    if not targets:
+        return []
+
+    # ⚠️ 真删之前再过一次权限。
+    #
+    #    用户给验证码是"同意删这件事"，
+    #    不代表"忽略权限档"。
+    #    万一有人把 task_id 对错了，也不至于删到不该删的地方。
+    allowed: list[str] = []
+    denied: list[str] = []
+    try:
+        from guard import task_perms as _tp
+
+        wd = workdir()
+        lv = _LEVEL
+        for f in targets:
+            try:
+                if _tp.is_allowed(f, lv, wd):
+                    allowed.append(f)
+                else:
+                    denied.append(f)
+            except Exception:  # noqa: BLE001
+                denied.append(f)      # 判不出来不算允许
+    except Exception:  # noqa: BLE001
+        # 连权限模块都拿不到 —— 一条都不删
+        return []
+
+    res: list = []
+    if allowed:
+        try:
+            from guard import sandbox as _sb
+
+            res = _sb.commit_deferred(allowed)
+        except Exception:  # noqa: BLE001
+            res = []
+
+    # 从盘上删掉已经处理完的
+    d = _load_pending()
+    if task_id:
+        d.pop(task_id, None)
+    else:
+        d.clear()
+    _save_pending(d)
     _PENDING_DELETES = []
+
     return res
 
 
@@ -744,9 +930,21 @@ def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
             command,
             cwd=work_dir,
             env=env,
-            timeout=max(5, min(timeout, 600)),
+            timeout=_effective_timeout(timeout),
             capture=True,
         )
+    except subprocess.TimeoutExpired:
+        # ⚠️ 超时 ≠ 沙箱不可用。
+        #
+        #    原来这里是 `except Exception: return None`，
+        #    把超时和"起不来"压成同一个 None。
+        #    调用方看到 None 就以为沙箱坏了，于是用普通方式再跑一遍。
+        #
+        #    后果：请求 3 秒超时 → 沙箱跑 5 秒 → 再跑 5 秒 ≈ 10 秒，
+        #    最后回一句"命令超时（3 秒）被中止"。说的时间不是做的时间。
+        #
+        #    超时往上传，调用方直接返回超时，不重跑。
+        raise
     except Exception:  # noqa: BLE001
         return None
 
@@ -870,8 +1068,16 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
     #
     #    这是 CI 打出来的：中文 Windows（936）上一直是绿的。
     if sys.platform == "win32":
-        r = _run_in_sandbox_if_possible(command, work_dir, env, timeout)
+        try:
+            r = _run_in_sandbox_if_possible(command, work_dir, env, timeout)
+        except subprocess.TimeoutExpired:
+            # 沙箱里跑超时了 —— 不要再跑一遍。
+            #
+            # 重跑一遍的话：用户说 3 秒，实际等 10 秒，
+            # 而且第二条命令可能又改一遍文件。
+            return _timeout_msg(command, timeout)
         if r is None:
+            # None 才是"沙箱不可用"，退回普通执行。
             r = _run_on_windows(command, work_dir, env, timeout)
     else:
         args = _build_args(command)
@@ -881,7 +1087,7 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
                 cwd=work_dir,
                 env=env,
                 capture_output=True,
-                timeout=max(5, min(timeout, 600)),
+                timeout=_effective_timeout(timeout),
                 creationflags=_nowindow_flags(),
             )
         except subprocess.TimeoutExpired:
@@ -890,7 +1096,7 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
             return f"起不来：{e}"
 
     if r is None:
-        return f"命令超时（{timeout} 秒）被中止：{command}"
+        return _timeout_msg(command, timeout)
 
     # ── 如果上面是"起不来"，_run_on_windows 会返回一个假的完成对象 ──
     if getattr(r, "_start_failed", False):
@@ -1087,13 +1293,55 @@ def execute(name: str, arguments: str) -> str:
     except (TypeError, ValueError):
         pass
 
+    # ── 锁死检查：单点收口 ──
+    #
+    # ⚠️ 这一道必须放在最前面，比动作守卫还前。
+    #
+    #    规则（用户定的）：
+    #        到 3 次 → 锁死 → 必须验证码
+    #        **永远不可能超过 3**
+    #
+    #    原来只做到了"派不出去"，没做到"跑不了"：
+    #        派活那道门查锁了（cmd_dispatch → gate）
+    #        执行这道门（execute）没查
+    #
+    #    所以任何直接调 execute 的路径都能绕过锁：
+    #        执行 → 触发拦截 → 计数 +1 → 涨到 6、9、12
+    #
+    #    这跟红队 F-02 是同一类错：
+    #        当时说的是"守卫只挂在 agent 循环里，execute 是裸的"
+    #        那次修了动作检查，漏了锁状态检查。
+    #
+    #    现在两道门都查，锁死才是真锁死。
+    try:
+        from guard import guard_gate as _gg
+
+        _c = _gg.peek_count()
+        if _c.get("tripped"):
+            return (
+                f"[锁死了] 任务端已经锁死（今天第 {_c.get('count')} 次被拦），"
+                "任何工具都不会执行。\n"
+                "要用的话先过验证码：码会发到配置的邮箱，"
+                "拿到之后在桌面端「危险操作验证」里填进去。\n"
+                "验证通过后计数清零，重新派活即可。"
+            )
+    except ImportError:
+        pass
+    except Exception:  # noqa: BLE001
+        # 计数读不出来 —— 不能因此放行。
+        # 这个判断跟 guard_gate.intercept 里"存储坏了按最严处理"一致。
+        return (
+            "[锁死了] 读不到拦截计数，按最严处理：工具不执行。\n"
+            "去桌面端看一眼「危险操作验证」那栏。"
+        )
+
     # ── 动作守卫：单点收口 ──
     #
     # 放在参数清洗之后、真正调用之前。
     # 这里用 late import 是为了避免循环依赖
     # （agent 会 import tools，tools 不该在顶层 import agent）。
     try:
-        from . import agent as _agent
+        from engine import agent as _agent
 
         verdict = _agent._check_action(name, json.dumps(args))
         if verdict is not None:

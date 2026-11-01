@@ -15,7 +15,7 @@ import json
 import urllib.error
 import urllib.request
 
-from .llm import _normalize_base
+from engine.llm import _normalize_base
 
 
 def list_models(base_url: str, api_key: str) -> tuple[bool, list[str], str]:

@@ -26,9 +26,9 @@ import os
 import time
 from dataclasses import dataclass, field
 
-from . import session as sess
-from . import tools
-from .llm import LLM, LLMError
+from engine import session as sess
+from engine import tools
+from engine.llm import LLM, LLMError
 
 SYSTEM_PROMPT = """你是一个在用户电脑上干活的助手。
 
@@ -299,7 +299,18 @@ def _check_action(name: str, arguments: str) -> str | None:
             hit = ag.destructive_move_or_truncate(cmd, tools.workdir())
             if hit:
                 reason = f"「{hit['kind']}」——{hit['why']}"
-        elif ag.touches_protected(cmd):
+
+        # ⚠️ touches_protected 原来挂在 elif 上，是**死分支**。
+        #
+        #    意思是：只有上面词表 describe() 先命中了，
+        #    才会走到 touches_protected。
+        #    而"单独去碰 .guard_key / guard_count"这种命令，
+        #    词表是命中不了的 —— 于是这条保护从来没生效过。
+        #
+        #    实测：cat guard/.guard_key 不触发任何拦截。
+        #
+        #    现在独立判断，不看上面有没有命中。
+        if not reason and ag.touches_protected(cmd):
             reason = "要动的是我自己的安全配置"
 
         # 第四层：系统级破坏 + 下载执行

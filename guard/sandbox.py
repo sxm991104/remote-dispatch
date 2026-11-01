@@ -158,6 +158,35 @@ def _ini_path() -> str:
     )
 
 
+def _detect_ini_encoding(path: str) -> str:
+    """探一下 ini 是什么编码。
+
+    Sandboxie.ini 在中文 Windows 上是 UTF-16 LE（带 BOM），
+    但也见过 ANSI 的。写之前必须知道——
+    往 UTF-16 的文件里追加 UTF-8 字节，写进去就是垃圾，
+    Sandboxie 读不懂，box_exists() 恒 False，影子层静默不启用。
+    """
+    try:
+        head = open(path, "rb").read(4)
+    except OSError:
+        return "utf-8"
+
+    if head.startswith(b"\xff\xfe"):
+        return "utf-16"
+    if head.startswith(b"\xfe\xff"):
+        return "utf-16"
+    if head.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+
+    # 没有 BOM：看有没有很多 \x00（UTF-16 里 ASCII 字符第二个字节是 0）
+    try:
+        raw = open(path, "rb").read(2048)
+    except OSError:
+        return "utf-8"
+    if raw and raw.count(b"\x00") > len(raw) // 4:
+        return "utf-16-le"
+    return "utf-8"
+
 def ensure_box() -> tuple[bool, str]:
     """确保沙箱存在。没有就建一个。
 
@@ -174,16 +203,36 @@ def ensure_box() -> tuple[bool, str]:
 
     ini = _ini_path()
     try:
-        if os.path.exists(ini):
-            with open(ini, "a", encoding="utf-8") as f:
-                f.write(
-                    f"\n[{BOX_NAME}]\n"
-                    "Enabled=y\n"
-                    "AutoDelete=n\n"
-                    "ConfigLevel=9\n"
-                )
-            return True, "沙箱已建"
-        return False, f"找不到配置文件：{ini}"
+        if not os.path.exists(ini):
+            return False, f"找不到配置文件：{ini}"
+
+        # ⚠️ 必须按文件**原来的编码**读写。
+        #
+        #    这个文件在这个模块里已经被坑过一次：
+        #    _read_ini 的注释写着"Sandboxie.ini 是 UTF-16，
+        #    按 UTF-8 读搜不到 [RemoteDispatch]，
+        #    实测沙箱建好却显示没建"。
+        #
+        #    而这里写的时候用的还是 encoding="utf-8" ——
+        #    往一个 UTF-16 的文件里追加 UTF-8 字节，
+        #    写进去的就成了垃圾：Sandboxie 读不懂，
+        #    box_exists() 恒 False，影子层静默不启用。
+        #
+        #    现在：先探编码，按同一个编码读全文、改、写回。
+        enc = _detect_ini_encoding(ini)
+        with open(ini, "r", encoding=enc, errors="replace") as f:
+            body = f.read()
+
+        if f"[{BOX_NAME}]" not in body:
+            body = body.rstrip() + (
+                f"\n[{BOX_NAME}]\n"
+                "Enabled=y\n"
+                "AutoDelete=n\n"
+                "ConfigLevel=9\n"
+            )
+            with open(ini, "w", encoding=enc) as f:
+                f.write(body)
+        return True, f"沙箱已建（按 {enc} 写）"
     except PermissionError:
         return False, "没有管理员权限，建不了沙箱"
     except OSError as e:
@@ -250,7 +299,7 @@ def run_in_box(
         然后按沙箱路径映射去读那个文件。
 
         实测确认：沙箱里写的文件，真机上没有，
-                  但 C:\Sandbox\... 下面那份读得到。
+                  但 C:\\Sandbox\\... 下面那份读得到。
     """
     start = _start_exe()
     if not start:
@@ -489,11 +538,29 @@ def list_deferred_deletes() -> list[dict]:
         return []
 
     out: list[dict] = []
-    # 沙箱里镜像出来的用户目录
-    for base in (
-        os.path.join(root, "user", "current"),
-        os.path.join(root, "drive", "C"),
-    ):
+
+    # ⚠️ 要扫**所有**盘，不能只扫 C。
+    #
+    #    原来写死了两个 base：user/current 和 drive/C。
+    #    于是 D 盘、E 盘上的删除根本进不了这个列表——
+    #    那只"新眼睛"恰好在最常见的场景（项目在 D 盘）上失明。
+    #
+    #    实测：workspaces 里一个 D:\\Project 的活，删了东西，
+    #    这里出来是空列表。
+    #
+    #    现在的做法：把 drive 下所有子目录都收进来。
+    bases = [os.path.join(root, "user", "current")]
+    drive_root = os.path.join(root, "drive")
+    if os.path.isdir(drive_root):
+        try:
+            for d in sorted(os.listdir(drive_root)):
+                p = os.path.join(drive_root, d)
+                if os.path.isdir(p):
+                    bases.append(p)
+        except OSError:
+            pass
+
+    for base in bases:
         if not os.path.isdir(base):
             continue
         for dirpath, _dirnames, filenames in os.walk(base):
@@ -515,13 +582,34 @@ def list_deferred_deletes() -> list[dict]:
 
 
 def _real_path_of(rel: str, base: str) -> str:
-    """把沙箱里的相对路径换算成真机路径。"""
+    """把沙箱里的相对路径换算成真机路径。
+
+    ⚠️ 原来只认 drive 下的 c 盘，别的盘一律返回空串。
+
+        后果很隐蔽：D 盘、E 盘上的删除检不出来——
+        那只"新眼睛"恰好在最常见的场景（项目在 D 盘）上失明。
+        而且 D 盘上的写入也留在沙箱里回不到真机，
+        任务报成功、用户看不到文件。
+
+        实测：_real_path_of('Project\\a.docx', '...\\drive\\D') → ''
+
+        README 和提交示例里用的就是 D:\\Project，
+        所以这条几乎必然被撞上。
+
+    现在：从 base 里把盘符抠出来，通用处理。
+    """
     low = base.replace("/", "\\").lower()
+
     if "\\user\\current" in low:
         home = os.path.expanduser("~")
         return os.path.join(home, rel)
-    if "\\drive\\c" in low:
-        return os.path.join("C:\\", rel)
+
+    # 通用：drive\<字母> → <字母>:\
+    m = re.search(r"\\drive\\([a-z])", low)
+    if m:
+        letter = m.group(1).upper()
+        return os.path.join(letter + ":\\", rel)
+
     return ""
 
 
@@ -658,13 +746,65 @@ def classify_changes(baseline: set[str] | None = None) -> dict:
 def recover_writes(changes: dict) -> dict:
     """把写入和修改落回真机。删除不动。
 
-    返回 {"ok": [...], "fail": [...]}。
+    ⚠️ 回写前要过权限检查。
+
+        这里原来是无条件 copy2：影子里有写，就复制到真机。
+        于是在"工作区"权限下，脚本往 %USERPROFILE%/Desktop 写的东西
+        会被自动落地 —— 文件工具走不过去的边界，脚本写过去就过了。
+
+        这跟 task_perms 那道边界是矛盾的：
+            文件工具 → _resolve → is_allowed → 拒
+            脚本写   → 影子 → recover_writes → 直接落地
+
+        现在的规则：
+            能落地  工作区里的、或者当前权限档允许的位置
+            不落地  权限外的东西——写进去了也留在沙箱里，
+                    并且明确告诉调用方"这几条因为权限没落地"。
+
+        为什么不是"拦住不执行"：
+            沙箱里执行的时候不知道会遇到什么，
+            只能事后按结果分类。所以这里做的是"事后过滤"。
+
+    返回 {"ok": [...], "fail": [...], "denied": [(路径, 原因)...]}。
     """
     ok: list[str] = []
     fail: list[tuple[str, str]] = []
+    denied: list[tuple[str, str]] = []
+
+    # 拿当前任务的工作区和权限档
+    workdir = ""
+    level = "workspace"
+    try:
+        from engine import tools as _tools
+        from guard import task_perms as _tp
+
+        workdir = _tools.workdir() or ""
+        level = getattr(_tools, "_LEVEL", "workspace")
+        _ = _tp  # 只是确认能导入
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _allowed(real_path: str) -> tuple[bool, str]:
+        # 这条路径准不准落回真机
+        if not workdir:
+            # 没有工作区信息 —— 不能瞎放
+            return False, "不知道任务的工作区，不敢落地"
+        try:
+            from guard import task_perms as _tp
+
+            if _tp.is_allowed(real_path, level, workdir):
+                return True, ""
+            return False, f"在「{level}」权限范围外"
+        except Exception as e:  # noqa: BLE001
+            # 判不出来就按最坏情况：不落地
+            return False, f"权限判断出错（{type(e).__name__}），按最坏处理"
 
     for pair in changes.get("writes", []) + changes.get("modifies", []):
         shadow, real = pair
+        okk, why = _allowed(real)
+        if not okk:
+            denied.append((real, why))
+            continue
         try:
             parent = os.path.dirname(real)
             if parent:
@@ -676,7 +816,7 @@ def recover_writes(changes: dict) -> dict:
         except OSError as e:
             fail.append((real, str(e)))
 
-    return {"ok": ok, "fail": fail}
+    return {"ok": ok, "fail": fail, "denied": denied}
 
 
 def apply_after_run(baseline: set[str] | None = None) -> dict:
@@ -699,6 +839,9 @@ def apply_after_run(baseline: set[str] | None = None) -> dict:
         "recovered": rec["ok"],
         "deletes": changes["deletes"],
         "failed": rec["fail"],
+        # 权限外、没落地的那几条——要让调用方知道，
+        # 不然用户以为写进去了，其实是空的
+        "denied": rec.get("denied") or [],
     }
 
 

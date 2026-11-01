@@ -1746,6 +1746,22 @@ class MainWindow(QMainWindow):
         lay.addWidget(h)
         lay.addWidget(sub)
 
+
+        # 四张卡各自独立成方法——改哪张直接跳过去，
+        # 不用在这个方法里翻几百行。
+        self._card_model(lay)
+        self._card_guard(lay)
+        self._card_autostart(lay)
+        self._card_paths(lay)
+
+        # 收尾：把内容塞进滚动区、把滚动区返回给调用方。
+        # （这两行原来在方法最末尾；拆卡片时被切进了 _card_paths，
+        #   那里没有 page/inner 变量，启动就 NameError。）
+        page.setWidget(inner)
+        return page
+
+    def _card_model(self, lay: QVBoxLayout) -> None:
+        """设置页 · 任务端模型卡。原来是 _build_settings_page 里的一大段，按卡片边界切出来的。"""
         # ── 任务端模型 ──
         #
         # 做成"列表 + 详情"：
@@ -1938,6 +1954,9 @@ class MainWindow(QMainWindow):
         #    最后才发现就是少了一行 addWidget。
         lay.addWidget(card)
 
+
+    def _card_guard(self, lay: QVBoxLayout) -> None:
+        """设置页 · 安全验证卡（收验证码的邮箱、发信服务器、授权码）。"""
         # ── 安全验证 ──
         #
         # 危险操作（删库、回滚、读密钥）要验证码。
@@ -2062,8 +2081,41 @@ class MainWindow(QMainWindow):
         ghint.setWordWrap(True)
         sc.addWidget(ghint)
 
+                # ⚠️ 验证码输入框。
+        #
+        #    原来这块只有一句说明，**没有输入框、没有按钮**。
+        #    而锁死之后唯一的出路就是填一个验证码——
+        #    也就是说：状态机走到死路，用户自己出不来。
+        #
+        #    现在补上。填完点「解锁」，调 /api/guard/unlock。
+        crow = QHBoxLayout()
+        crow.setSpacing(8)
+
+        self.ed_unlock_code = QLineEdit()
+        self.ed_unlock_code.setPlaceholderText("收到邮件里的 6 位验证码")
+        self.ed_unlock_code.setMaxLength(12)
+        self.ed_unlock_code.setMinimumWidth(160)
+        crow.addWidget(self.ed_unlock_code)
+
+        b_unlock = QPushButton("解锁")
+        b_unlock.setObjectName("primary")
+        b_unlock.setCursor(Qt.PointingHandCursor)
+        b_unlock.clicked.connect(self._do_unlock)
+        crow.addWidget(b_unlock)
+        crow.addStretch()
+        cl.addLayout(crow)
+
+        self.lbl_unlock_msg = QLabel("")
+        self.lbl_unlock_msg.setFont(font(10.5))
+        self.lbl_unlock_msg.setStyleSheet(f"color:{C_DIM2};")
+        self.lbl_unlock_msg.setWordWrap(True)
+        cl.addWidget(self.lbl_unlock_msg)
+
         lay.addWidget(scard)
 
+
+    def _card_autostart(self, lay: QVBoxLayout) -> None:
+        """设置页 · 启动行为卡（开机自启）。"""
         # ── 启动行为 ──
         acard = QFrame()
         acard.setObjectName("card")
@@ -2099,6 +2151,9 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(acard)
 
+
+    def _card_paths(self, lay: QVBoxLayout) -> None:
+        """设置页 · 路径配置卡（五条路径）。"""
         # ── 路径配置 ──
         # 这三个是启动服务必须知道的。原来写死在代码里，
         # 换台机器就跑不起来，所以搬到这里让用户自己管。
@@ -2152,9 +2207,6 @@ class MainWindow(QMainWindow):
         pl.addLayout(prow)
 
         lay.addWidget(pcard)
-
-        page.setWidget(inner)
-        return page
 
     # ── 安全验证 ──
 
@@ -2236,26 +2288,43 @@ class MainWindow(QMainWindow):
             return
 
         domain = text.rsplit("@", 1)[1]
-        host, port = self._SMTP.get(domain, ("", 0))
 
-        if host:
-            self.lbl_guard_host.setText(f"{host}  端口 {port}   ← 自动识别")
-            self.lbl_guard_host.setStyleSheet(
-                f"color:{C_OK}; padding:8px 13px;"
-                f" background:{C_INPUT}; border:1px solid {C_LINE};"
-                f" border-radius:9px;"
-            )
-            self._guard_host_value = (host, port)
-        else:
+        # 先查表
+        host, port = self._SMTP.get(domain, ("", 0))
+        guessed = False
+
+        if not host:
+            # ⚠️ 表里没有不等于配不了。
+            #
+            #    原来这里直接置空，_save_guard 看到空值就 return——
+            #    用户填了真实邮箱，界面只说一句"认不出"，
+            #    实际上什么都没提交，而屏幕上写着"发送失败"
+            #    （那是上一次的残留），用户一头雾水。
+            #
+            #    现在按通用规律猜：xxx@company.com → smtp.company.com
+            #    企业邮箱绝大多数是这个规律。猜错了用户能改。
+            host = f"smtp.{domain}"
+            port = 465
+            guessed = True
+
+        if guessed:
             self.lbl_guard_host.setText(
-                f"认不出 {domain} 的服务器，你可以先保存试试"
+                f"{host}  端口 {port}   ← 按域名推测的，不对就手动改"
             )
             self.lbl_guard_host.setStyleSheet(
                 f"color:{C_WARN}; padding:8px 13px;"
                 f" background:{C_INPUT}; border:1px solid {C_LINE};"
                 f" border-radius:9px;"
             )
-            self._guard_host_value = ("", 0)
+        else:
+            self.lbl_guard_host.setText(f"{host}  端口 {port}   ← 自动识别")
+            self.lbl_guard_host.setStyleSheet(
+                f"color:{C_OK}; padding:8px 13px;"
+                f" background:{C_INPUT}; border:1px solid {C_LINE};"
+                f" border-radius:9px;"
+            )
+
+        self._guard_host_value = (host, port)
 
     def _save_guard(self) -> None:
         host, port = getattr(self, "_guard_host_value", ("", 0))
@@ -2270,10 +2339,10 @@ class MainWindow(QMainWindow):
         if not body["email"]:
             self.lbl_guard_msg.setText("收验证码的邮箱得填")
             return
+        # host 为空只可能是检测函数还没跑过（没输邮箱）。
+        # 那时也不该静默 return——说清楚缺什么。
         if not host:
-            self.lbl_guard_msg.setText(
-                "认不出这个邮箱的发信服务器，换一个常见邮箱试试（QQ / 163 / Gmail）"
-            )
+            self.lbl_guard_msg.setText("先把上面的邮箱填上")
             return
         if not body["smtp_user"]:
             self.lbl_guard_msg.setText("前台 Agent 发信账号得填")
@@ -2291,6 +2360,27 @@ class MainWindow(QMainWindow):
         self.api.request_once("/api/guard", body, callback=done)
 
     def _test_guard(self) -> None:
+        """发一封测试邮件。
+
+        ⚠️ 把**界面上填的值**一起发过去。
+        #
+        #    原来发的是空 body，服务端只好去读已保存的配置——
+        #    而用户还没点保存（正常顺序是先测再存）。
+        #    结果：用户填了 163 邮箱，测的却是 test@example.com，
+        #    永远"发送失败"，而他还以为是自己填错了。
+        """
+        host, port = getattr(self, "_guard_host_value", ("", 0))
+        body = {
+            "email": self.ed_guard_email.text().strip(),
+            "smtp_host": host,
+            "smtp_port": port,
+            "smtp_user": self.ed_guard_user.text().strip(),
+            "smtp_pass": self.ed_guard_pass.text().strip(),
+        }
+        if not body["email"]:
+            self.lbl_guard_msg.setText("先把收验证码的邮箱填上")
+            return
+
         def done(data):
             if isinstance(data, dict) and data.get("ok"):
                 self.lbl_guard_msg.setText(data.get("message") or "发出去了")
@@ -2302,7 +2392,7 @@ class MainWindow(QMainWindow):
                 )
 
         self.lbl_guard_msg.setText("发测试邮件…")
-        self.api.request_once("/api/guard/test", {}, timeout=40, callback=done)
+        self.api.request_once("/api/guard/test", body, timeout=40, callback=done)
 
     # ── 行为 ──
     def refresh(self) -> None:

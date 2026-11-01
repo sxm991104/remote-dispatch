@@ -173,7 +173,9 @@ def main() -> int:
         #    现在：白名单之外的真失败要计进 failed_modules，
         #    让退出码变红。分歧照样显式记录在 known 里，
         #    但"分歧"和"失败"是两件事，不能混。
-        known = ("::ffff:127.0.0.1", "提示注入未绕过闸门")
+        # ⚠️ 豁免取消：那两条分歧已经各自在用例里改对了（::ffff 判本机是对的、
+        #    提示注入派活层本来就不该按文字判断）。按标签前缀豁免会掩盖将来的真问题。
+        known: tuple[str, ...] = ()
         rt_real_fail = 0
         for line in (r.stdout or "").splitlines():
             t = line.strip()
@@ -239,6 +241,66 @@ def main() -> int:
                 print(f"    {line.strip()}")
         if r.returncode != 0:
             failed_modules.append("暴力攻击")
+
+    # ── 端到端（真起进程、真派活）──
+    #
+    # ⚠️ 这一节是今天加的，因为前面所有测试都在**同一个进程里**跑。
+    #
+    #        它们测"函数返回对不对"，不测"拉下来能不能用"。
+    #
+    #    而 1.3.3 那次重构的两处断链恰好都在进程边界上：
+    #        · bridge.py 移进 core/ 了，scheduler/api_server 还在旧路径找
+    #          → worker 起不来，同进程测试一点都看不出来
+    #        · core/bridge.py 用相对导入
+    #          → 脚本模式静默失败 → 退回 DSH → 用错 provider
+    #
+    #    347 条测试全绿，功能却是瘫的。这就是"假绿"。
+    #
+    #    这一节不管"函数对不对"，只管"真的能跑起来吗"。
+    #    它慢，但它是唯一能回答那个问题的东西。
+    print(f"\n{'─' * 66}")
+    print("  端到端（真起服务、真派活）")
+    print(f"{'─' * 66}")
+
+    e2e = os.path.join(ROOT, "tests", "e2e.py")
+    if os.path.exists(e2e):
+        try:
+            r = subprocess.run(
+                [sys.executable, e2e],
+                cwd=ROOT, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=600,
+            )
+            out = r.stdout or ""
+            for line in out.splitlines():
+                s = line.strip()
+                if s.startswith("❌") or s.startswith("⏭"):
+                    print(f"  {s}")
+            for line in out.splitlines():
+                if "合计：" in line:
+                    print(f"  {line.strip()}")
+
+            import re as _re
+
+            m = _re.search(r"合计：(\d+) 通过，(\d+) 失败", out)
+            if m:
+                e2e_pass, e2e_fail = int(m.group(1)), int(m.group(2))
+                total_pass += e2e_pass
+                total_fail += e2e_fail
+                if e2e_fail > 0:
+                    failed_modules.append(f"端到端({e2e_fail})")
+                    for line in out.splitlines():
+                        if line.strip().startswith("·"):
+                            print(f"    {line.strip()}")
+            else:
+                total_fail += 1
+                failed_modules.append("端到端(异常)")
+                tail = (out[-600:] + (r.stderr or "")[-600:])
+                for ln in tail.splitlines()[-15:]:
+                    print(f"    {ln}")
+        except subprocess.TimeoutExpired:
+            total_fail += 1
+            failed_modules.append("端到端(超时)")
 
     elapsed = time.time() - t0
 

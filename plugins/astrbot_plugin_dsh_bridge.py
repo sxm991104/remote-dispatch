@@ -46,8 +46,60 @@ PLUGIN_NAME = "astrbot_plugin_dsh_bridge"
 #    C:\Users\19836\Downloads 下面能接管（实测 Downloads 目录已经有了
 #    沙箱那套标记：deny FILE_DELETE_CHILD、专用 SID、Low 完整性标签），
 #    所以把桥搬过来，pwsh 才跑得起来。
-BRIDGE_DIR = r"C:\Users\19836\Downloads\qqaibot-bridge"
-BRIDGE_PY = os.path.join(BRIDGE_DIR, "bridge.py")
+# ⚠️ 桥的目录。不能写死成本机的某个路径——
+#
+#    原来这里是 BRIDGE_DIR = r"C:\Users\<某人>\Downloads\qqaibot-bridge"，
+#    那是作者自己机器上的部署目录。
+#    别人 clone 下来，这条路不存在：
+#        bridge 插件 → 派活必然失败
+#        push/digest → 静默失效（_read_outbox 发现文件不在就返回空）
+#
+#    现在的顺序：
+#        1. 插件配置里填的 bridge_dir（最优先，用户可以自己指）
+#        2. 环境变量 DSH_BRIDGE_DIR
+#        3. 跟插件同级的几个常见位置
+#        4. 都找不到 → 用一个"明显不存在"的占位，让调用方在真正用的时候
+#           报一句清楚的错，而不是在 import 阶段就炸掉插件
+#
+#    为什么不在这里 raise：
+#        AstrBot 加载插件时抛异常，会把整个插件停用，
+#        连"改配置"的入口都进不去了。宁可晚一点报。
+
+
+def _guess_bridge_dir() -> str:
+    """按优先级找桥的目录。"""
+    # 1. 环境变量（部署脚本可以用它指定）
+    env = os.environ.get("DSH_BRIDGE_DIR", "").strip()
+    if env:
+        return env
+
+    # 2. 从插件自己的位置往上找
+    #    常见布局：
+    #        <桥目录>/plugins/astrbot_plugin_xxx/main.py
+    #        <AstrBot 数据目录>/plugins/astrbot_plugin_xxx/main.py
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.dirname(os.path.dirname(here))
+    if os.path.exists(os.path.join(cand, "core", "bridge.py")):
+        return cand
+
+    # 3. 几个常见位置（用户的下载目录、用户目录）
+    home = os.path.expanduser("~")
+    for rel in (
+        os.path.join("Downloads", "qqaibot-bridge"),
+        "qqaibot-bridge",
+        "remote-dispatch",
+    ):
+        p = os.path.join(home, rel)
+        if os.path.exists(os.path.join(p, "core", "bridge.py")):
+            return p
+
+    # 4. 找不到。返回一个占位——
+    #    调用方检查 os.path.exists 时会得到 False，
+    #    可以据此给出"去配置里填 bridge_dir"的提示。
+    return ""
+
+BRIDGE_DIR = _guess_bridge_dir()
+BRIDGE_PY = os.path.join(BRIDGE_DIR, "core", "bridge.py")
 TASKS_FILE = os.path.join(BRIDGE_DIR, "tasks.jsonl")
 
 # 后台执行时的单任务上限。因为不再等待，这个可以放得很宽。
@@ -309,6 +361,31 @@ class DshBridgePlugin(Star):
                     f"{result}\n"
                     "--- 结束 ---\n\n"
                     "【怎么转述给用户】\n"
+                    # ⚠️ 第 0 条优先级最高，先判它。
+                    #
+                    #    原因：任务端被权限拦下的时候，说的是
+                    #        "目标：xxx / 结果：写不进去 / 三种方式全被拦"
+                    #    而真正要用户做的事（提权、给验证码）藏在段落末尾。
+                    #
+                    #    按下面第 1 条的规则去找"回答问题的段落"，找到的是
+                    #    "写不进去"——用户第一眼看到的是"没做成"，
+                    #    而不是"我要给个验证码"。
+                    #
+                    #    用户的原话：
+                    #        "前台现在变成了直接给任务端的东西直接返回"
+                    #        "你不能依靠前台理解，因为前台犯错了会被骂"
+                    #
+                    #    所以先判这一条：要用户动手的，第一句就说清要干什么。
+                    "0. **先看这段里有没有「要用户动手」的事。** 有的话，"
+                    "第一句就说「你要做什么」，别把任务端的复述放前面。"
+                    "常见的有：\n"
+                    "   - 出现【需要提权】→ 第一句："
+                    "「它要动某个文件但权限不够，需要你给个验证码」\n"
+                    "   - 出现「验证码」「提权」→ 同上\n"
+                    "   - 任务没跑成但**你能接手做**（比如「你自己建个文件就行」）"
+                    "→ 第一句：「我没做成，你可以自己做：…」\n"
+                    "   这种情况下，把「要用户做的步骤」放最前，"
+                    "任务端的技术细节放后面或者只说一句概括。\n"
                     "1. 先在用户最初问的那句话里找出「他要的答案是什么」，"
                     "再到上面这段原文里找**直接回答它的那一段**，把那段放在最前面说。\n"
                     "2. 不要拿「开头那句总结」当结论——它常常不是答案。\n"
@@ -497,6 +574,33 @@ class DshBridgePlugin(Star):
             没说就留空，用默认那套。
 
             名字不用完全对，写个大概就行——我这边会模糊匹配。
+
+        看到「【需要提权】」怎么办（这条是硬流程，不用理解，照着走）：
+        ------------------------------------------------------------------
+        任务端碰不了某个位置的时候，结果里第一句会是：
+
+            【需要提权】 这个位置不在当前权限能碰的范围里：<路径>
+            当前权限：<现在那一档>——<这一档能干什么>
+            提到「<下一档>」这一档就能碰。提权需要用户给验证码。
+
+        **看到这个标记，就照下面三步走，不要自己分析为什么：**
+
+            第一步  把这句话原样告诉用户（主要是路径和"提到哪一档"）
+            第二步  走提权流程拿验证码（你不是发码的人，
+                    让用户去邮箱拿，他给你你再交上来）
+            第三步  提权成功之后，**用同一个窗口名**再派一次原来的活
+
+        ⚠️ 第三步是关键：不要开新窗口。
+           新窗口没提过权，等于白折腾一遍，用户还得再来一次。
+
+        ⚠️ 不要做的事情：
+           · 不要猜"可能是权限问题"然后再验证——标记已经写在那了
+           · 不要自己改路径绕过去（比如把文件写到别的地方）
+           · 不要把这段话复述成一堆技术细节——用户只关心
+             "它想动哪个文件、要你确认什么"
+
+        ⚠️ 如果不是【需要提权】而是别的错误，照常把错误原文告诉用户就行，
+           不要往提权上引。
 
         Args:
             task(string): 要电脑端做的事。用用户的原话，或者用户确认过的内容。
@@ -768,7 +872,19 @@ class DshBridgePlugin(Star):
                 if pid:
                     url += "?" + _up.urlencode({"profile": pid})
 
-            with _ur.urlopen(url, timeout=15) as r:
+            # ⚠️ 必须包成 Request 才带得上 token。
+            #
+            #    原来写的是 _ur.urlopen(url, ...)——url 是个字符串，
+            #    不带任何 header，接口一律回 401。
+            #    实测：这个工具**从来没有成功过**。
+            #
+            #    后果：模型想看"这套模型下已有哪些窗口"，
+            #    看到的永远是"查窗口失败"，于是它每次新开窗口——
+            #    那次"断了上下文，做出来的跟之前不一样"就是这么来的。
+            with _ur.urlopen(
+                _ur.Request(url, headers={"X-Token": _api_token()}),
+                timeout=15,
+            ) as r:
                 data = _json.loads(r.read())
 
             windows = (data or {}).get("windows") or []
@@ -941,6 +1057,127 @@ class DshBridgePlugin(Star):
             )
         except Exception as e:  # noqa: BLE001
             return f"发验证码出错：{type(e).__name__}: {e}。这个操作先别派。"
+
+    @filter.llm_tool(name="computer_status")
+    async def computer_status(self, event):
+        """看一眼任务端现在的状态：锁没锁、能不能派。
+
+        什么时候用（重要）：
+            用户问「现在能派吗」「为什么派不出去」「到哪了」
+            「是不是卡住了」这类问题的时候，**先调这个**，
+            不要凭聊天上下文里的印象回答。
+
+        为什么必须查：
+            任务端会被锁（今天被拦满三次）、会排队、会卡住。
+            这些状态变化跟聊天内容无关——
+            聊得再顺，任务端也可能是锁着的。
+
+            实测：锁死之后问「现在能派吗」，
+            不查就答「能派」，实际派出去是 blocked。
+
+        返回的是给人看的一段话，直接转述就行。
+        """
+        try:
+            import json as _json
+            import urllib.request as _ur
+
+            # 锁状态
+            chk = _ur.Request(
+                "http://127.0.0.1:8790/api/guard/check",
+                # ⚠️ task 不能传空串——/api/guard/check 会回 400
+                #    （它要求有具体的任务才判得出危不危险）。
+                #    这里只是查状态，传个占位词；
+                #    占位词不会触发 dangerous（那只看内容）
+                data=_json.dumps({"task": "查状态"}).encode("utf-8"),
+                headers={"Content-Type": "application/json",
+                         "X-Token": _api_token()},
+                method="POST",
+            )
+            with _ur.urlopen(chk, timeout=10) as _r:
+                gd = _json.loads(_r.read())
+
+            lines = []
+            if gd.get("tripped"):
+                lines.append(
+                    f"⛔ 任务端锁死了（今天被拦了 {gd.get('trip_count')} 次）。"
+                    "任何活都派不出去。要解锁得有验证码。"
+                )
+            elif gd.get("fenced"):
+                lines.append(f"⛔ 任务端被安全锁关着：{gd.get('reason') or ''}")
+            else:
+                lines.append("✅ 任务端没锁，可以派活。")
+
+            # 模型和并发
+            try:
+                p = _ur.Request(
+                    "http://127.0.0.1:8790/api/live",
+                    headers={"X-Token": _api_token()},
+                )
+                with _ur.urlopen(p, timeout=10) as _r2:
+                    live = _json.loads(_r2.read())
+                rows = live.get("live") or []
+                running = [r for r in rows if r.get("status") == "running"]
+                lines.append(
+                    f"现在 {len(running)} 个任务在跑。"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+            return "\n".join(lines)
+        except Exception as e:  # noqa: BLE001
+            return f"查不到任务端状态：{type(e).__name__}: {e}"
+
+    @filter.llm_tool(name="unlock_computer")
+    async def unlock_computer(self, event, code: str = ""):
+        """用验证码解锁**整个任务端**。
+
+        什么时候用（这条很重要）：
+            任务端锁死了（今天被拦满三次），这时候：
+                · 任何活都派不出去
+                · 连查进度、看窗口都做不了
+            唯一出路就是这个验证码。
+
+        跟 verify_dangerous_code 的区别：
+            verify_dangerous_code  验证**某一件**具体的活
+            unlock_computer        解锁**整个任务端**，不针对哪一件
+
+        锁死时发的码，对应的就是"解锁整个任务端"这件事——
+        所以拿到码之后调这个，不要调 verify_dangerous_code，
+        也不要让用户重新说一遍他刚才想干嘛。
+
+        用户已经把码发来了 → 直接传进来，别多问。
+        验过了 → 告诉他可以继续派活了。
+
+        Args:
+            code(string): 用户从邮箱里收到的验证码。
+        """
+        code = (code or "").strip()
+        if not code:
+            return "把邮箱里那个验证码发我，我直接给你解锁。"
+
+        try:
+            import json as _json
+            import urllib.request as _ur
+
+            body = _json.dumps({"code": code}).encode("utf-8")
+            req = _ur.Request(
+                "http://127.0.0.1:8790/api/guard/unlock",
+                data=body,
+                headers={"Content-Type": "application/json",
+                         "X-Token": _api_token()},
+                method="POST",
+            )
+            with _ur.urlopen(req, timeout=20) as r:
+                d = _json.loads(r.read())
+
+            if d.get("ok"):
+                return (
+                    "解锁了，任务端现在能正常派活。\n"
+                    "刚才那件事你再说一遍我就派出去。"
+                )
+            return f"没验过：{d.get('message') or d.get('error') or '码不对'}"
+        except Exception as e:  # noqa: BLE001
+            return f"解锁接口没通：{type(e).__name__}: {e}"
 
     @filter.llm_tool(name="verify_dangerous_code")
     async def verify_dangerous_code(self, event, task: str, code: str):

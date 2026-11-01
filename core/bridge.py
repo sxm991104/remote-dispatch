@@ -847,9 +847,29 @@ def _invoke_engine(task: str, timeout: int, task_id: str = "") -> dict | None:
 
     配置好之后，DSH 就完全用不上了——不用装 Node，不用装 DSH。
     """
+    # ⚠️ 用绝对导入，不用 `from . import`。
+    #
+    #    bridge.py 有两个运行方式：
+    #        包模式   python -m core.bridge       （相对导入能work）
+    #        脚本模式 python core/bridge.py run   （worker 就是这么起的）
+    #
+    #    脚本模式下 __package__ 虽然被我们补成了 "core"，
+    #    但 "from . import" 仍然抛 ImportError——
+    #    而且被下面的 except 吞掉，静默返回 None。
+    #
+    #    后果：worker 每次都退回 DSH 那条路，
+    #          用 codebuddy 的 provider 跑，报 NO_ADAPTER。
+    #          表现是"派出去的活永远 pending"。
+    #
+    #    实测：相对导入 ImportError，绝对导入 OK。
     try:
-        from . import engine_bridge
-    except Exception:  # noqa: BLE001
+        from core import engine_bridge
+    except Exception as _e:  # noqa: BLE001
+        # 不要把错误吞干净——留一条日志，不然又是个静默失效。
+        try:
+            _log_quiet(f"引擎分支进不去，退回 DSH：{type(_e).__name__}: {_e}")
+        except Exception:  # noqa: BLE001
+            pass
         return None
 
     if not engine_bridge.is_configured():
@@ -1371,9 +1391,19 @@ def cmd_run(task_id: str, timeout: int = 1800) -> dict:
             target = t
             break
     if target is None:
-        rec_nf = {"id": task_id, "status": "error", "error": "找不到这个任务"}
-        notify_outbox(task_id, rec_nf)
-        return rec_nf
+        # ⚠️ 不推送。
+        #
+        #    "找不到这个任务"说明这条记录本来就不该存在——
+        #    可能刚被删掉、被清理、或者 worker 拿着过期的 id 起来了。
+        #
+        #    实测（用户截图）：测试里派了活、跑完立刻删表，
+        #    而 worker 起得比删表慢，于是连着推了 4 条：
+        #        [锁死验证] 没跑成：找不到这个任务
+        #    而用户根本不知道"锁死验证"是什么。
+        #
+        #    用户没见过的任务，不该出现在他的通知里。
+        _log_quiet(f"run: 找不到任务 {task_id}（可能已被删除），不推送")
+        return {"id": task_id, "status": "not-found", "error": "找不到这个任务"}
 
     if target.get("status") in ("ok", "error", "timeout", "empty"):
         return target
@@ -1467,7 +1497,7 @@ def notify_outbox(task_id: str, rec: dict, task_text: str = "") -> None:
         skipped: list[dict] = []
         if st == "ok":
             try:
-                from . import outputs as _outputs
+                from core import outputs as _outputs
 
                 batch = _outputs.collect(_task_workdir(task_id))
                 files = batch.get("files") or []
