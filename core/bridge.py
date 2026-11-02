@@ -974,22 +974,39 @@ def _invoke_dsh(task: str, timeout: int, task_id: str = "") -> dict:
         except OSError:
             pass
 
-    # ⚠️ 权限模式：任务端的我，要跟桌面版一样能碰整台机器。
+    # ⚠️ 权限模式：按 task_perms 的等级走，不是一律全开。
     #
-    #    DSH 沙箱默认 workspace-write —— 只能写**一个**工作目录。
-    #    实测症状：让它去 D:\Project 建个文件，报
-    #        Access denied  [sandbox: file access denied under workspace-write]
-    #    换 cwd 只能换个"能写的地方"，治不了"要同时写两处"。
+    #    这里原来写死 danger-full-access —— 注释理由是：
+    #        DSH 沙箱默认 workspace-write 只能写**一个**工作目录，
+    #        实测去别处建文件报 Access denied。
+    #    那个现象是真的，但结论错了：
+    #        **默认就全开，等于把"默认最小 + 按需提权"这条设计废掉。**
     #
-    #    根子在这（--dump-config 看到的）：
-    #        - id: sandbox-policy
-    #          config:
-    #            mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'
-    #    所以不用改配置文件，**塞一个环境变量就够**。
+    #    而自带引擎那条路（agent.py）早就按 task_perms 走了，默认 workspace。
+    #    结果同一个任务，走自带引擎收着、走 DSH 全开 —— 两条路不一致。
     #
-    #    代价要清楚：它现在跟桌面版的我同一个权限，能读写这台机器上任何地方。
-    #    所以"心跳看得到在干什么"和"能随时停掉"这两条才变得必要——都已经有了。
-    child_env["DSH_PERMISSION_MODE"] = "danger-full-access"
+    #    DSH 沙箱只有三挡（--dump-config 里看到的）：
+    #        read-only / workspace-write / danger-full-access
+    #    映射：
+    #        workspace   → workspace-write   （DSH 默认那档，最保守）
+    #        home/full   → danger-full-access（DSH 没有"能碰用户目录"这一档）
+    #
+    #    为什么 home 也只能退到 full：DSH 没这个中间档。
+    #    但至少 **默认的 workspace 真的收住了**，跟自带引擎一致。
+    #
+    #    要改的话不用动配置文件，塞环境变量就够（DSH 那边是
+    #        mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'
+    #    ）。
+    _perm = "workspace"
+    try:
+        import guard.task_perms as _task_perms
+
+        _perm = _task_perms.get_level(task_id or "") or "workspace"
+    except Exception:  # noqa: BLE001
+        pass
+    child_env["DSH_PERMISSION_MODE"] = (
+        "workspace-write" if _perm == "workspace" else "danger-full-access"
+    )
 
     def _once(sid: str) -> tuple[dict, str]:
         # 命令前缀 + 参数。dsh_cmd 通常是 [node, bin.js]，
