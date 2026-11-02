@@ -60,7 +60,123 @@ def _missing() -> str:
     return ""
 
 
+def _say(msg: str) -> None:
+    """有控制台就打印，没有就弹框。
+
+    ⚠️ 双击启动时（pythonw）没有控制台 ——
+        这时候 print 等于什么都没做，用户只看到"点了没反应"。
+
+        踩过：用户双击桌面快捷方式，窗口一直不出来，
+        也没任何提示。查了半天才发现在 import PySide6 就崩了，
+        而 pythonw 把那段 traceback 直接丢了。
+    """
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(0, msg, "dsh-bridge", 0x10)
+    except Exception:  # noqa: BLE001
+        print(msg)
+
+
+def _pick_python() -> str:
+    """挑一个能跑界面的解释器。
+
+    ⚠️ 为什么需要这个
+
+        双击 .pyw 走的是系统关联（C:\\WINDOWS\\pyw.exe），
+        它用的是 **WindowsApps 里的那个 Python** ——
+        可能是微软商店的占位程序，也可能是另一个没装 PySide6 的。
+
+        结果：窗口还没出来就崩在 import PySide6，
+        而 pythonw 没有控制台，报错看不见。
+
+    顺序：
+        一、当前解释器（如果是用 pythonw 直接双击，就是它）
+        二、同目录的 python.exe
+        三、PATH 里的 python
+        四、常见位置（LocalAppData / Program Files）
+
+    返回 "" 表示一个都没有。
+    """
+    import shutil
+    import subprocess
+
+    def has_pyside(exe: str) -> bool:
+        if not exe or not os.path.exists(exe):
+            return False
+        # 用 -c 探一下，不 import 界面本体（那个很重）
+        try:
+            r = subprocess.run(
+                [exe, "-c", "import PySide6; print(1)"],
+                capture_output=True, timeout=25,
+                creationflags=0x08000000,   # NO_WINDOW
+            )
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    # 一、当前这个
+    if has_pyside(sys.executable):
+        return sys.executable
+
+    # 二、同目录的 python.exe（pythonw 旁边通常有一个）
+    d = os.path.dirname(sys.executable)
+    for name in ("python.exe", "pythonw.exe"):
+        p = os.path.join(d, name)
+        if has_pyside(p):
+            return p
+
+    # 三、PATH
+    for name in ("python", "python3"):
+        p = shutil.which(name)
+        if has_pyside(p):
+            return p
+
+    # 四、常见位置
+    import glob
+
+    pats = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     "Programs", "Python", "Python3*", "python.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""),
+                     "Python3*", "python.exe"),
+        os.path.join(os.environ.get("USERPROFILE", ""),
+                     "AppData", "Roaming", "uv", "tools",
+                     "*", "Scripts", "python.exe"),
+    ]
+    for pat in pats:
+        for p in glob.glob(pat):
+            if has_pyside(p):
+                return p
+
+    return ""
+
+
 def main() -> int:
+    # ⚠️ 先确认界面依赖在不在。
+    #
+    #    双击 .pyw 用的是系统关联的解释器（可能是 WindowsApps 里那个），
+    #    如果它没装 PySide6，窗口还没出来就崩了 ——
+    #    而 pythonw 没有控制台，用户只看到"双击了没反应"。
+    py = _pick_python()
+    if not py:
+        _say(
+            "找不到装了 PySide6 的 Python。\n\n"
+            "界面要它才能画出来。装一下：\n"
+            "    python -m pip install PySide6\n\n"
+            "装完之后，用**这个** Python 再跑：\n"
+            "    <那个python的路径>\\start_desktop.pyw"
+        )
+        return 1
+
+    # 当前解释器不行的话，换一个重跑自己。
+    #
+    #    不能就地 import —— 依赖是按进程算的，
+    #    这个进程里的 sys.path 已经定死了。
+    if os.path.abspath(py) != os.path.abspath(sys.executable):
+        os.execv(py, [py, os.path.abspath(__file__)] + sys.argv[1:])
+        return 1
+
     miss = _missing()
     if miss:
         # 有控制台就把话说清楚；没有就弹个框。

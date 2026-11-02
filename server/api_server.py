@@ -505,6 +505,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/engine/profiles":
             return self._profiles_get()
 
+        if path == "/api/auditor":
+            # 安全审核员。跟主模型分开的两套配置。
+            try:
+                from guard import auditor as _aud
+
+                cfg = _aud.load()
+                ok, why = _aud.is_ready(cfg)
+                cfg["_ready"] = ok
+                cfg["_why"] = why
+                return self._send(*_json(cfg))
+            except Exception as e:  # noqa: BLE001
+                return self._send(*_json({"error": str(e)}, 500))
+
 
         if path == "/api/perms":
             try:
@@ -646,6 +659,71 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 st, b = _json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
             return self._send(st, b)
+
+        if path == "/api/auditor":
+            # 存安全审核员配置
+            try:
+                from guard import auditor as _aud
+
+                cfg = _aud.load()
+                for k in ("enabled", "base_url", "api_key", "model",
+                          "on_error", "audit_writes", "audit_modifies"):
+                    if k in body:
+                        cfg[k] = body[k]
+                ok = _aud.save(cfg)
+                ready, why = _aud.is_ready(_aud.load())
+                return self._send(*_json({"ok": ok, "ready": ready, "why": why}))
+            except Exception as e:  # noqa: BLE001
+                return self._send(*_json({"ok": False, "error": str(e)}, 500))
+
+
+        if path == "/api/auditor/verify":
+            # 验审核验证码 → 关掉审核一段时间。
+            #
+            # ⚠️ 这个接口只接受**码**，不接受"我要关审核"这种命令。
+            #
+            #    前台会调它（用户回复的码要转过来），
+            #    但前台**不知道**码是什么 —— 它只是把用户说的转给这里。
+            #    验码在服务端做，前台说了不算。
+            from guard import auditor_code as _ac
+            from guard import auditor_state as _ast
+
+            code = str(body.get("code") or "").strip()
+            dur = str(body.get("duration") or "1h").strip()
+            if dur not in _ac.__dict__.get("DURATIONS", {}) and dur not in ("1h", "4h", "today"):
+                dur = "1h"
+
+            ok, msg = _ac.verify(code)
+            if not ok:
+                return self._send(*_json({"ok": False, "error": msg}, 400))
+
+            until = _ast.mark_off(dur, "用户验证通过")
+            import time as _t
+
+            return self._send(*_json({
+                "ok": True,
+                "message": msg,
+                "until": until,
+                "remaining": max(0, int(until - _t.time())),
+            }))
+
+        if path == "/api/auditor/status":
+            # 看审核员现在什么状态。只读。
+            from guard import auditor as _aud
+            from guard import auditor_state as _ast
+
+            s = _ast.get()
+            cfg = _aud.load()
+            ready, why = _aud.is_ready(cfg)
+            return self._send(*_json({
+                "state": s["state"],
+                "until": s["until"],
+                "why": s["why"],
+                "enabled": cfg.get("enabled"),
+                "ready": ready,
+                "ready_why": why,
+                "remaining": _ast.remaining(),
+            }))
 
         if path == "/api/engine/models":
             try:

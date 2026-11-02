@@ -829,17 +829,54 @@ def apply_after_run(baseline: set[str] | None = None) -> dict:
     """跑完命令后的统一处理。
 
     1. 分类
-    2. 写入/修改 → 回写（用户无感）
-    3. 删除 → 留在返回的列表里，等验证码
+    2. **审核**（安全审核员，见 guard/auditor.py）
+    3. 审核通过 → 写入/修改回写；删除仍留在列表里等验证码
+       审核不通过 → 全部扣住，不回写，等用户点头
+
+    ⚠️ 审核为什么在这一步：
+
+        沙箱里跑的时候不知道会遇到什么，只能事后按结果分类。
+        而分类完了、写回真机之前，是最合适的拦截点：
+        这时候已经知道「改了什么」，但真机还一个字节都没动。
+
+        顺序很重要 —— 审核必须在 recover_writes 之前。
+        反过来的话，文件已经落地了才问「这改得对不对」，
+        那时候原文已经被覆盖，问也没用了。
 
     返回：
         {
             "recovered": [回写成功的真机路径...],
             "deletes":   [需要用户确认的删除...],
             "failed":    [(路径, 原因)...],
+            "denied":    [(路径, 原因)...],
+            "audit":     {审核结果} 或 None（审核员没开）
         }
     """
     changes = classify_changes(baseline)
+
+    # ── 审核 ──
+    #
+    # 审核员没开 / 没配 → verdict=skip → 等于没有这道闸，照常走。
+    # 开了但网络挂了 → 按配置里的 on_error 决定放行还是拦住。
+    audit = None
+    try:
+        from guard import auditor as _auditor
+
+        audit = _auditor.review(changes)
+    except Exception as e:  # noqa: BLE001
+        # 审核员自己崩了，不能把功能卡死
+        audit = {"verdict": "skip", "reasons": [f"审核员异常：{e}"], "need_code": False}
+
+    if audit and audit.get("verdict") == "block":
+        # 扣住：一个字都不落地
+        return {
+            "recovered": [],
+            "deletes": changes["deletes"],
+            "failed": [],
+            "denied": [],
+            "audit": audit,
+        }
+
     rec = recover_writes(changes)
     return {
         "recovered": rec["ok"],
@@ -848,6 +885,7 @@ def apply_after_run(baseline: set[str] | None = None) -> dict:
         # 权限外、没落地的那几条——要让调用方知道，
         # 不然用户以为写进去了，其实是空的
         "denied": rec.get("denied") or [],
+        "audit": audit,
     }
 
 
