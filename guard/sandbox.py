@@ -48,6 +48,15 @@ _DEFAULT_DIRS = (
 # 用户自己也可能用 DefaultBox 装别的程序，混在一起不好分。
 BOX_NAME = "RemoteDispatch"
 
+# 沙箱里断网的那一行。
+#
+# ⚠️ 这是**软隔离**（用户态挂钩）—— 恶意程序能绕。
+#
+#    为什么还要写：至少挡掉不走心的绕过。
+#    硬隔离要 [GlobalSettings] 的 NetworkEnableWFP=y，
+#    那是全局配置、要重启，不替用户改 —— 见 guard/netguard.py。
+_NET_BLOCK = "AllowNetworkAccess=n"
+
 _install_cache: str | None = None
 _install_checked = False
 
@@ -232,12 +241,25 @@ def ensure_box() -> tuple[bool, str]:
         if f"[{BOX_NAME}]" not in body:
             body = body.rstrip() + (
                 f"\n[{BOX_NAME}]\n"
+                f"{_NET_BLOCK}\n"
                 "Enabled=y\n"
                 "AutoDelete=n\n"
                 "ConfigLevel=9\n"
             )
             with open(ini, "w", encoding=enc) as f:
                 f.write(body)
+
+        # 老沙箱升级上来：断网那一行可能还没有，补上。
+        try:
+            from guard import netguard as _ng
+
+            if not _ng.box_has_network_block():
+                _ng.apply_to_box()
+        except Exception:  # noqa: BLE001
+            # 补不上不算失败 —— 沙箱能用，只是网络那道闸没关上。
+            # status() 会如实报出来。
+            pass
+
         return True, f"沙箱已建（按 {enc} 写）"
     except PermissionError:
         return False, "没有管理员权限，建不了沙箱"

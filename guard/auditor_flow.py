@@ -78,8 +78,16 @@
 
 ## 现在是什么状态
 
-    review() 里还是空实现（一律 pass）。
-    这份文件先放流程骨架，等 review() 写完再接上。
+    全部跑通了：
+        命中 → 发码 → 单向通告 → 用户填码 + 选时长 → 关窗口
+        窗口过期 → 又要码
+
+    这份文件只留流程说明；实现在：
+        guard/auditor.py          主流程
+        guard/auditor_state.py    四个状态 + 到期恢复
+        guard/auditor_code.py     码和计数（跟任务端分开）
+        guard/auditor_prompt.py   提示词
+        guard/auditor_review.py   真调模型
 """
 
 from __future__ import annotations

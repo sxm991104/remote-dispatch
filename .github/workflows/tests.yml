@@ -58,6 +58,34 @@ jobs:
         run: |
           python -m pip install python-docx openpyxl python-pptx pypdf
 
+      # ⚠️ PySide6 单独一步，**失败要阻塞**。
+      #
+      #    为什么要装它：
+      #        tests/test_desktop_boots.py 会把桌面端真的建出来，
+      #        切一遍四个页面。没有 PySide6 那条会跳过 ——
+      #        等于桌面端拆坏了 CI 也不知道。
+      #
+      #        2026-11-02 拆 desktop/app.py 时连着崩了三次：
+      #            QWidget 没 import       → 窗口开不了
+      #            ServiceCard 没 import   → 服务页崩
+      #            _userdirs 没 import     → 环境页崩
+      #        全都是静态检查看不出来、只有真建窗口才炸的。
+      #
+      #    代价：多下 200-300MB，CI 慢一两分钟。
+      #    不装的代价：界面坏了没人知道 —— 那更贵。
+      #
+      #    ⚠️ 失败要阻塞（没有 continue-on-error）：
+      #       装不上就该知道，而不是静默跳过测试。
+      - name: 装 PySide6（桌面端测试要用）
+        run: |
+          python -m pip install PySide6
+
+      # 无显示器环境下 Qt 要用 offscreen 平台。
+      # 测试文件里也设了默认值，这里再设一次是保险。
+      - name: 设 Qt 无头模式
+        shell: bash
+        run: echo "QT_QPA_PLATFORM=offscreen" >> $GITHUB_ENV
+
       # ⚠️ 失败时把日志写进 job summary。
       #
       #    2026-11-01 那次推送，Windows 上两个 Python 版本都红了，

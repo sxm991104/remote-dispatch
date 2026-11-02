@@ -92,11 +92,23 @@ def main() -> int:
         # 这类错 py_compile 拦不住（语法是对），pytest 也拦不住（没人 import 界面），
         # 但一炸就是整个桌面端打不开。2026-11-02 一天里犯了两次。
         ("界面静态检查", "tests/test_ui_static.py"),
+        # 扫「用了但没定义也没 import」的名字 ——
+        # 拆文件时最常犯的错，py_compile 完全看不出来。
+        ("名字静态检查", "tests/test_static_names.py"),
+        # 真的把窗口建出来、切一遍四个页面。
+        # ⚠️ 上面那两条静态检查拦不住"运行某个函数才炸"的错：
+        #    tools/deps.py 缺 _userdirs 的 import，静态全过，
+        #    一点「环境」页就崩 —— 从 1.3.3 潜伏到现在。
+        #    没有 PySide6 会 skip，CI 里装了所以会真跑。
+        ("桌面端启动", "tests/test_desktop_boots.py"),
     ]
 
     total_pass = 0
     total_fail = 0
     failed_modules = []
+    # 「全跳过」的模块 —— 不算失败，但要让人看见。
+    # 否则没装 PySide6 的环境会一直以为桌面端测过了。
+    skipped_modules = []
 
     for label, path in modules:
         full = os.path.join(ROOT, path)
@@ -126,7 +138,20 @@ def main() -> int:
                 print(f"  {line.strip()}")
                 break
 
-        if r.returncode != 0:
+        # ⚠️ 「全部跳过」不等于失败，也不等于通过。
+        #
+        #    pytest 在「0 个测试被收集、全部 skip」时返回 1，
+        #    和真失败一个退出码。于是这一条被算进 failed_modules，
+        #    报出来是「失败模块：桌面端启动」，但实际 0 失败 0 通过 ——
+        #    看的人一头雾水。
+        #
+        #    而且更危险的是反过来：如果它静默算通过，
+        #    没装 PySide6 的环境就永远测不到界面。
+        #
+        #    所以：看输出里有没有 skipped，有就明确报出来。
+        if "skipped" in (r.stdout or "") and r.returncode != 0:
+            skipped_modules.append(label)
+        elif r.returncode != 0:
             failed_modules.append(label)
 
             # ⚠️ 原来只打 "FAILED xxx" 这一行，看不到为什么失败。

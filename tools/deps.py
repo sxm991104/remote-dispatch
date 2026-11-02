@@ -30,6 +30,12 @@ import threading
 import urllib.error
 import urllib.request
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py。
+# ⚠️ 这个 import 是补的 —— 之前把 APPDATA 换成 userdirs 时，
+#    调用处换了，import 忘了加。
+#    NameError 只在切到「环境」页时才炸，所以一直没被发现。
+import tools.userdirs as _userdirs
+
 # ── 依赖清单 ────────────────────────────────────────────
 #
 # 每一条：
