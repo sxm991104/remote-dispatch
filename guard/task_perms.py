@@ -27,6 +27,9 @@ from __future__ import annotations
 import json
 import os
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 LEVELS = ("workspace", "home", "full")
 
 LEVEL_LABEL = {
@@ -43,8 +46,7 @@ LEVEL_HINT = {
 
 
 def _cfg_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "dsh-bridge", "task_perms.json")
+    return _userdirs.config_file("task_perms.json")
 
 
 def load() -> dict:

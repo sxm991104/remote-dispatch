@@ -42,6 +42,22 @@ _mark_utf8()
 from guard import task_perms  # noqa: E402
 from guard import guard  # noqa: E402
 
+# ⚠️ 开跑之前先把守卫状态清干净。
+#
+#    这是个独立脚本（不是 pytest 模块），run_all.py 是另起进程跑它的。
+#    但守卫状态**落盘**了（lock_state.json / guard.json），
+#    所以上一个测试文件留下的状态会被继承：
+#
+#        实测（WSL2 Ubuntu 24.04）：
+#        先跑 test_guard.py（里面测了三次错误码锁死）
+#        再跑本脚本 → 第 3 步「带对码 → 生效」失败
+#
+#        因为守卫还锁着，填对码也不放行。
+#
+#    单跑没问题，全量跑才挂 —— 跟 test_perm_verify 当初污染别人是同一类问题，
+#    只是方向反过来：这次是它被别人污染。
+guard.reset_all()
+
 # 打桩：不发真邮件，直接塞一个码
 _real_send = guard.send_code_email
 
@@ -185,6 +201,12 @@ if pd:
     ck("D 的码改不了 E", task_perms.get_level("任务E"), "workspace")
 
 print("\n" + "=" * 68)
+# 跑完清一次，别把状态留给下一个（run_all 里我们后面还有暴力攻击、端到端）
+try:
+    guard.reset_all()
+except Exception:  # noqa: BLE001
+    pass
+
 print(f"结果：{PASS} 通过，{FAIL} 失败")
 print("=" * 68)
 

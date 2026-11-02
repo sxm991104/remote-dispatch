@@ -150,12 +150,18 @@ def _ini_path() -> str:
         C:\\Windows\\Sandboxie.ini   系统级（管理员写的）
         用户目录下的         用户级
     """
+    # ⚠️ Sandboxie 只有 Windows 版。
+    #    非 Windows 直接返回空串 —— 调用方据此判断「影子执行不可用」，
+    #    而不是拿着一个假路径去 os.path.exists。
+    if sys.platform != "win32":
+        return ""
     p = r"C:\Windows\Sandboxie.ini"
     if os.path.exists(p):
         return p
-    return os.path.join(
-        os.environ.get("APPDATA") or "", "Sandboxie", "Sandboxie.ini"
-    )
+    _appdata = os.environ.get("APPDATA") or ""
+    if not _appdata:
+        return ""
+    return os.path.join(_appdata, "Sandboxie", "Sandboxie.ini")
 
 
 def _detect_ini_encoding(path: str) -> str:

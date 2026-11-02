@@ -117,8 +117,7 @@ def _api_token() -> str:
     """
     import os
 
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    p = os.path.join(base, "dsh-bridge", "api_token.txt")
+    p = _dsh_paths.config_file("api_token.txt")
     try:
         if os.path.exists(p):
             return open(p, encoding="utf-8").read().strip()

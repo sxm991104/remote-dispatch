@@ -27,6 +27,9 @@ import json
 import os
 import sys
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 APP_NAME = "dsh-bridge"
 
 
@@ -38,10 +41,7 @@ def app_dir() -> str:
 
 
 def config_dir() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, APP_NAME)
-    os.makedirs(d, exist_ok=True)
-    return d
+    return _userdirs.config_dir(APP_NAME)
 
 
 def config_path() -> str:
@@ -310,6 +310,23 @@ LNK_NAME = "dsh-bridge.lnk"
 
 
 def startup_dir() -> str:
+    """Windows 的「启动」文件夹。
+
+    ⚠️ 这个只有 Windows 有。
+
+        原来是无条件算 %APPDATA%\\Microsoft\\Windows\\Start Menu\\...，
+        在 Linux 上会得到一个不存在的路径，而且 set_autostart
+        会去那儿建 .lnk —— 静默失败，或者建出一堆垃圾目录。
+
+        现在非 Windows 直接返回空串，调用方据此报「这个平台不支持」。
+
+    Linux / macOS 的开机自启是另一套：
+        Linux   ~/.config/autostart/xxx.desktop
+        macOS   登录项（launchd / System Settings）
+    这两套没做——Linux 上我们不做桌面端，也不用开机自启。
+    """
+    if sys.platform != "win32":
+        return ""
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     return os.path.join(
         base, "Microsoft", "Windows", "Start Menu", "Programs", "Startup"

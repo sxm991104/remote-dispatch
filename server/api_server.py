@@ -1030,6 +1030,24 @@ class Handler(BaseHTTPRequestHandler):
         if not pid:
             pid = (P.default_profile() or {}).get("id") or ""
 
+        # ⚠️ 一套能用的模型都没有时，**这里就得拦住**。
+        #
+        #    原来照样派：任务写进去、worker 拉起来、
+        #    然后因为没模型挂了（错误还被 DEVNULL 吞掉），
+        #    状态停在 running —— 界面一直转圈。
+        #
+        #    实测：全新环境派活 → 状态 running → 永远转圈。
+        #    新手等几分钟，关掉，卸载。
+        #
+        #    拦在这里，并把「该怎么办」说清楚。
+        if not P.enabled_profiles():
+            return {
+                "error": "还没有能用的模型，活派出去也跑不了。",
+                "hint": "去「设置」页点「＋ 新增模型」，"
+                        "填接口地址、API Key、模型名，点「测试连接」通过了再「保存」。",
+                "code": "no_model",
+            }
+
         prof = P.get_profile(pid) if pid else {}
         limit = int((prof or {}).get("concurrency") or 1)
 

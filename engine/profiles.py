@@ -32,16 +32,16 @@ import json
 import os
 import time
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 APP_NAME = "dsh-bridge"
 
 DEFAULT_MAX_STEPS = 40
 
 
 def config_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, APP_NAME)
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "engine.json")
+    return _userdirs.config_file("engine.json", APP_NAME)
 
 
 def _new_id() -> str:
@@ -423,13 +423,31 @@ def enabled_profiles() -> list[dict]:
     return out
 
 
-def default_profile() -> dict:
+def default_profile(require_ready: bool = True) -> dict:
     """没指定用哪套时的默认选择。
 
-    启用的里面挑第一个。全都没启用就退回第一套。
+    ⚠️ 默认**只返回能用的**（开了且有 base_url/api_key/model）。
+
+        原来是这样：
+            eps = enabled_profiles()
+            if eps: return eps[0]
+            profiles = load_all()...
+            return profiles[0] if profiles else {}
+
+        ↑ **一套能用的都没有时，它返回一套没配好的。**
+        调用方以为拿到能用的，实际是个残废 ——
+        于是照派、worker 拉起来、然后挂了，
+        而任务状态停在 running，界面一直转圈。
+
+        实测：全新环境派活 → 状态 running → 界面永远转圈。
+
+    require_ready=False 时才退回第一套（给「编辑页默认选一个」用，
+    那种场景要的是一个可编辑的对象，不是能跑的配置）。
     """
     eps = enabled_profiles()
     if eps:
         return eps[0]
+    if require_ready:
+        return {}
     profiles = load_all().get("profiles") or []
     return profiles[0] if profiles else {}

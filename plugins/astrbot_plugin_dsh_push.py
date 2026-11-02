@@ -13,7 +13,7 @@
     三个关键决定：
 
     一、**用文件做中转，不直接发消息。**
-       电脑端那个进程不知道 QQ 的会话信息，也不该知道。
+       电脑端那个进程不知道聊天平台的会话信息，也不该知道。
        它只管写"我做完了"，谁去通知是这边的事。
        而且用户不在线时，通知躺在文件里，不会丢。
 
@@ -123,8 +123,7 @@ def _api_token() -> str:
     """
     import os
 
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    p = os.path.join(base, "dsh-bridge", "api_token.txt")
+    p = _dsh_paths.config_file("api_token.txt")
     try:
         if os.path.exists(p):
             return open(p, encoding="utf-8").read().strip()

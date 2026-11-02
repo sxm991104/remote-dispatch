@@ -31,14 +31,14 @@ import time
 import urllib.error
 import urllib.request
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 CHANNEL_PORT = 6186
 
 
 def _token_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "dsh-bridge")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "channel_token.txt")
+    return _userdirs.config_file("channel_token.txt")
 
 
 def _read_token() -> str:

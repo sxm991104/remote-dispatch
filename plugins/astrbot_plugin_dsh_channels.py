@@ -1,10 +1,14 @@
 """按需启停平台通道。
 
 为什么做这个
-    原来点一次「启动」，QQ 和飞书一起起来：
-        QQ  → 拉起 QQ 客户端 + NapCat（几百兆）
-        飞书 → 纯网络连接（几十兆）
-    只用飞书的用户，QQ 那部分白占内存，低配机器直接带不动。
+    原来点一次「启动」，所有通道一起起来：
+        飞书 / 钉钉等官方平台 → 纯网络连接（几十兆）
+        QQ                  → 拉起 QQ 客户端 + NapCat（几百兆）
+    只用官方平台的用户，QQ 那部分白占内存，低配机器直接带不动。
+
+    ⚠️ 关于 QQ 通道：它是社区方案（NapCat 注入 QQ 客户端），
+       不是官方接口。保留是为了「自己的号、自己的群」这个场景，
+       但不推荐，也不会再往这条路扩展。见 README「接哪些聊天软件」。
 
     所以拆开：想用哪个点哪个，没点的不启动。
 
@@ -42,11 +46,7 @@ PLUGIN_NAME = "astrbot_plugin_dsh_channels"
 LISTEN_PORT = 6186
 
 # token 存在固定位置，桌面端读它
-TOKEN_PATH = os.path.join(
-    os.environ.get("APPDATA") or os.path.expanduser("~"),
-    "dsh-bridge",
-    "channel_token.txt",
-)
+TOKEN_PATH = _dsh_paths.config_file("channel_token.txt", create=True)
 
 
 @register(PLUGIN_NAME, "dsh", "按需启停 QQ / 飞书通道", "1.0.0")

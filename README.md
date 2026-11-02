@@ -1,6 +1,6 @@
 # remote-dispatch
 
-**v1.3.2** · [更新日志](CHANGELOG.md) · [接下来往哪走](ROADMAP.md) · [测试说明](TESTS.md) · [踩过的坑](PITFALLS.md) · [任务怎么写](examples/task-templates.md)
+**v1.3.3** · [更新日志](CHANGELOG.md) · [接下来往哪走](ROADMAP.md) · [测试说明](TESTS.md) · [踩过的坑](PITFALLS.md) · [任务怎么写](examples/task-templates.md)
 
 让聊天窗口里的 AI，把活派到你的电脑上干，干完带着成果回来。
 
@@ -23,6 +23,9 @@
 
 **如果你只想看它能不能用，跳过下面所有字，就做这三步。**
 
+> **在 Linux 上？** 下面这节是 Windows 的（带桌面端）。
+> Linux 的看 [Linux 上跑起来](#linux-上跑起来) —— 三条命令，没有界面。
+
 ### 第一步：装依赖
 
 ```bash
@@ -34,7 +37,7 @@ python -m pip install -r requirements-dev.txt
 **需要 Python 3.10+ 和 Windows 10/11。** 装的时候勾了「Add Python to PATH」，
 下面这些命令就能直接用。
 
-### 第二步：打开桌面端
+### 第二步：打开桌面端（Windows）
 
 ```bash
 python -m desktop.app
@@ -46,7 +49,7 @@ python -m desktop.app
 
 ```
 任务     派活、看进度、看结果
-服务     QQ 通道 / 飞书通道 / 任务端，各一个开关
+服务     聊天通道 / 任务端，各一个开关
 设置     模型配置、程序路径、开机自启
 ```
 
@@ -57,7 +60,7 @@ python -m desktop.app
 | 模型 | 任何 OpenAI 兼容的接口：DeepSeek 官方 / 通义 / Kimi / 本地 Ollama |
 | 路径 | QQ、NapCat、AstrBot 装在哪（开着界面时不填也行，用哪个填哪个） |
 
-**路径没填也能试用**——先不用 QQ，直接在「任务」页派一条活试试。
+**路径没填也能试用**——先不接任何聊天平台，直接在「任务」页派一条活试试。
 
 ### 第三步：派第一条活
 
@@ -89,11 +92,13 @@ python -m desktop.app
 ### 你人在外面也能用
 
 ```
-手机 QQ 上说：帮我把昨天的会议记录整理一下
-                ↓
-           电脑上真的在跑
-                ↓
-手机 QQ 收到：整理好了 + 会议记录.docx
+手机上说：  帮我把昨天的会议记录整理一下
+            ↓
+        电脑上真的在跑
+            ↓
+手机上收到：整理好了 + 会议记录.docx
+
+（QQ、飞书、钉钉都行，看你怎么接 —— 见上面「接哪些聊天软件」）
 ```
 
 **这就是这个项目要解决的问题。** 聊天里的 AI 没有终端、没有文件系统，
@@ -111,6 +116,75 @@ python -m desktop.app
 
 ---
 
+## 接哪些聊天软件
+
+**分两类。这两类的差别不是"哪个好用"，是**风险归谁**。**
+
+### 一、官方接口（推荐）
+
+**这些都有公开的平台文档、有审核、有 SLA。出事找平台，因为那是正规用法。**
+
+| 平台 | 怎么接 | 要不要公网 IP |
+|---|---|---|
+| **飞书** | 自建应用 + 长连接 | **不用** |
+| 钉钉 | Stream 模式 | 不用 |
+| 企微 / 公众号 | 官方开放平台 | 公众号要 |
+| KOOK | 开放平台 | 不用 |
+| Telegram / Discord / Slack | 官方 Bot API | 不用 |
+| Matrix / Mattermost | 开源协议，能自建 | 你说了算 |
+
+**飞书是这条路上最省事的：**
+
+```
+建一个自建应用 → 拿到 app_id / app_secret
+→ 填进 AstrBot
+→ 长连接，不用公网 IP、不用备案、不用开端口
+```
+
+**在 AstrBot 里配好平台，再把这些插件放进它的 `plugins/` 就行。**
+**插件本身跟平台无关 —— 换平台不用改代码。**
+
+### 二、QQ 个人号（社区方案，自担风险）
+
+**这条路是：QQ 客户端 + [NapCat](https://github.com/NapNeko/NapCatQQ)，
+NapCat 往 QQ 进程里注入 DLL，把 QQ 变成能收发消息的机器人。**
+
+**我们把它留着，是因为它在一个地方有别人替代不了的价值：**
+**你自己的 QQ 号，你自己的群，你不用建企业应用、不用填资料、不用等审核。**
+
+**但下面这几条得说清楚，不是吓唬人：**
+
+```
+一、它依赖 QQ 客户端的内部结构。
+    QQ 一更新，NapCat 可能就跟不上了。
+    这是随时会断的东西，不是"理论上可能"。
+
+二、它绕过了腾讯的官方接口。
+    条款上属于灰区，账号风险由用的人自己承担。
+    我们见过：一天重启十几次，账号进禁言状态（Ban state forbit write req）。
+
+三、它只能在 Windows 上跑。
+    Linux 上没有 QQ 客户端，这条路直接断。
+```
+
+**所以我们不推荐它，但也不替你决定。**
+
+**如果你已经有企业应用、或者只是自己用**，走官方接口更省心。
+
+**如果你就是想在 QQ 群里用它**，NapCat 这条路能走，风险你自己心里有数就行。
+
+### 只支持官方接口，是因为不想把风险转给用的人
+
+**一个开源项目让人 clone 下来用，用的人应该承担"配置错了"的风险，**
+**不该承担"这个项目走的可能是灰区"的风险。**
+
+**所以以后新增平台，只往官方接口那边加。**
+
+**QQ 个人号这一条会一直留着（Windows 上还能用），但不会再扩展。**
+
+---
+
+
 ## 它长什么样
 
 **整套东西有四个角色，各住在不同的地方：**
@@ -118,7 +192,7 @@ python -m desktop.app
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                                                          │
-│   你（QQ / 飞书）                                          │
+│   你（飞书 / 钉钉 / QQ…）                                  │
 │      │                                                   │
 │      ▼                                                   │
 │   ┌────────────────────┐                                 │
@@ -341,10 +415,9 @@ txt/md/csv/json/代码文件     直接读（自动试 UTF-8 / GBK）
   ——任务端自带引擎，**不用装 DeepSeek Harness**（从 v1.1.0 起）
 - `pywin32`（只有 `watchdog.py` 需要——它用 Windows 的目录变更通知）
 
-**可选：如果你想用 QQ / 飞书通道**，还需要
-- QQ 客户端 + [NapCat](https://github.com/NapNeko/NapCatQQ)
-- [AstrBot](https://github.com/AstrBotDevs/AstrBot)（前台那个 AI 住在这里）
-- 或者只用飞书：一条飞书自建应用就够，不用 AstrBot
+**可选：如果你想从聊天软件用它**，还需要
+[AstrBot](https://github.com/AstrBotDevs/AstrBot) —— 前台那个 AI 住在里面，
+它负责接各个平台。具体接哪个，见下面「接哪些聊天软件」。
 
 **你还需要知道：**
 - 任务端**默认只有工作区权限**——只能动它自己那个任务目录里的东西
@@ -516,7 +589,7 @@ workspaces/<任务名>/                  ← 它的工作目录
 
 ```bash
 # 派一条任务，立刻返回
-python bridge.py dispatch "在 D:\Project\demo 下建个 README.md，写三行简介"
+python core/bridge.py dispatch "在 ~/demo 下建个 README.md，写三行简介"
 
 # 真干活（一般在后台调）
 python bridge.py run --id t-20261027120000
@@ -561,6 +634,178 @@ python guard_git.py apply D:\Project\某个项目
 
 ---
 
+## Linux 上跑起来
+
+**先说清楚：Linux 上没有桌面端。**
+
+不是因为懒 —— Linux 桌面在中国只有 2.12%（Statcounter 2026-07），
+而愿意装 Linux 的基本都是搞技术的。他们要的是一条命令能跑，
+不是一个界面。所以这边给的是三个脚本。
+
+### 你需要
+
+```
+Python 3.10+      大多数发行版自带
+pip               装依赖才用，跑起来不用
+```
+
+没有的话：
+
+```bash
+# Ubuntu / Debian
+sudo apt install python3 python3-pip
+
+# Fedora
+sudo dnf install python3 python3-pip
+
+# Arch
+sudo pacman -S python python-pip
+```
+
+### 三步
+
+```bash
+git clone https://github.com/sxm991104/remote-dispatch.git
+cd remote-dispatch
+
+./setup.sh          # 一、检查环境、建目录、生成配置模板
+./start.sh          # 二、起服务（Ctrl+C 停，或者用 --daemon 后台跑）
+./status.sh         # 三、看它在不在跑、任务在干什么
+```
+
+**`setup.sh` 会告诉你还差什么，不会替你做主**（不改系统包管理器、不改 shell 配置）。
+
+### 填模型
+
+```bash
+$EDITOR ~/.config/dsh-bridge/engine.json
+```
+
+**至少要改 `api_key` 那一行。**
+
+```json
+{
+  "profiles": [
+    {
+      "id": "p1",
+      "name": "我的模型",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "把 key 填在这里",
+      "model": "deepseek-chat",
+      "enabled": true,
+      "concurrency": 1
+    }
+  ]
+}
+```
+
+**`base_url` 填任何 OpenAI 兼容的接口都行**：DeepSeek / OpenAI / 通义 /
+Kimi / 本地 Ollama。见 [任务端](#任务端任何-openai-兼容的接口)。
+
+### 配置放哪
+
+**Linux 遵循 XDG 规范，不是 `~/dsh-bridge/`。**
+
+```
+~/.config/dsh-bridge/          ← 默认（$XDG_CONFIG_HOME 没设时）
+$XDG_CONFIG_HOME/dsh-bridge/   ← 设了就跟着走
+```
+
+**里面这些文件：**
+
+```
+api_token.txt     接口的访问令牌（第一次启动自动生成）
+engine.json       模型配置
+guard.json        危险操作验证码的邮箱配置（可选）
+task_perms.json   各窗口的权限（默认工作区）
+```
+
+**想换位置就设 `XDG_CONFIG_HOME`，整个目录跟着走。**
+
+### 接聊天软件
+
+**装 AstrBot，然后把 `plugins/` 下这几个文件拷进它的 `plugins/` 目录：**
+
+```
+plugins/astrbot_plugin_dsh_bridge.py
+plugins/astrbot_plugin_dsh_channels.py
+plugins/astrbot_plugin_dsh_digest.py
+plugins/astrbot_plugin_dsh_push.py
+plugins/_dsh_paths.py              ← 这几个插件共用的路径工具
+```
+
+**AstrBot 在 Linux 上的装法见 [它的文档](https://docs.astrbot.app)。**
+
+**接哪个平台见上面 [接哪些聊天软件](#接哪些聊天软件) ——
+飞书、钉钉这些官方接口在 Linux 上都能用，QQ 个人号不行（没有 QQ 客户端）。**
+
+**插件不需要改代码。** 它们只依赖 AstrBot 的通用接口，跟具体平台无关。
+
+### 起在后台
+
+```bash
+./start.sh --daemon      # 后台跑，日志写 bridge.log
+./status.sh              # 看状态
+./start.sh --stop        # 停
+```
+
+**端口默认 8790，只接受本机连接。** 要换端口设 `DSH_BRIDGE_PORT`。
+
+### 开机自启
+
+**仓库没带这个** —— 不同发行版的做法不一样，装一个 systemd unit 或者
+往 `~/.config/autostart/` 放个 `.desktop` 都行，看你的情况。
+
+**一个最小的 systemd user unit 长这样：**
+
+```ini
+# ~/.config/systemd/user/remote-dispatch.service
+[Unit]
+Description=remote-dispatch bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/remote-dispatch
+ExecStart=%h/remote-dispatch/start.sh
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now remote-dispatch
+```
+
+### 验证一下它真的能跑
+
+```bash
+./start.sh --daemon
+./status.sh
+#  进程      跑着（pid xxx）
+#  端口      8790
+#  engine.json   有
+```
+
+**然后派一条不靠模型的活试试：**
+
+```bash
+TOKEN=$(cat ~/.config/dsh-bridge/api_token.txt)
+curl -s -X POST http://127.0.0.1:8790/api/dispatch   -H "X-Token: $TOKEN" -H "Content-Type: application/json"   -d '{"task":"在 /tmp 建一个 hello.txt，写三行字","name":"第一条"}'
+```
+
+**或者跑一遍测试，确认这台的 Python 环境没问题：**
+
+```bash
+python3 -m pip install pytest
+python3 tests/run_all.py
+```
+
+---
+
+
 ## 桌面端
 
 一个 Windows 程序，双击打开。不用装 Python，不用开命令行。
@@ -575,15 +820,15 @@ python guard_git.py apply D:\Project\某个项目
 
 ### 按需启动：用哪个开哪个
 
-**点一次把 QQ 和飞书一起拉起来，是这一版之前最大的毛病。**
+**点一次把所有通道一起拉起来，是这一版之前最大的毛病。**
 
 ```
-QQ 通道    要拉 QQ 客户端（实测 350 MB）+ NapCat
-飞书通道    只是网络连接（几十兆），很轻
-任务端      跟通道无关，永远通
+飞书 / 钉钉等官方平台    只是网络连接（几十兆），很轻
+QQ 通道               要拉 QQ 客户端（实测 350 MB）+ NapCat
+任务端                 跟通道无关，永远通
 ```
 
-**只用飞书的人，一个 QQ 进程都不会有。** 低配机尤其重要。
+**只用官方平台的人，一个 QQ 进程都不会有。** 低配机尤其重要。
 
 实测：
 
@@ -592,9 +837,14 @@ QQ 通道    要拉 QQ 客户端（实测 350 MB）+ NapCat
 | 只开飞书 | 0.2 秒 | QQ 进程 0 个 |
 | 只开 QQ | 138 秒（含扫码） | QQ 客户端 350 MB |
 
-两条通道**互斥**：点飞书会自动关掉 QQ 的连接，反之亦然。用户点的语义就是「我只要这个」。
+通道之间**互斥**：点飞书会自动关掉 QQ 的连接，反之亦然。用户点的语义就是「我只要这个」。
 
 **注意：关 QQ 通道不会杀你的 QQ 客户端。** 那是用户自己的 QQ，乱杀会把他正在用的东西全断掉。通道关了只是 AstrBot 不再跟它通信。
+
+> ⚠️ **QQ 通道是社区方案，不是官方接口。**
+> 它靠 NapCat 往 QQ 进程注入 DLL 工作 —— 依赖 QQ 内部结构、
+> 条款上属于灰区、只能在 Windows 上跑。
+> 详见 [接哪些聊天软件](#接哪些聊天软件)。
 
 ### 怎么做到不停 AstrBot 就切通道
 

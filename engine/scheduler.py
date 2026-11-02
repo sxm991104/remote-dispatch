@@ -198,23 +198,57 @@ def queue_position(profile_id: str, task_id: str) -> int:
     return 0
 
 
+def _worker_log_path(task_id: str) -> str:
+    """每个任务的 worker 日志。出问题能翻。"""
+    safe = "".join(
+        c if (c.isalnum() or c in "-_.") else "_" for c in str(task_id)
+    ) or "task"
+    return os.path.join(BRIDGE_DIR, "workspaces", safe, "worker.log")
+
 def start_worker(task_id: str) -> None:
     """起一个后台进程真干活。跟 api_server 里那个一样。"""
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     flags = 0x08000000 | 0x00000008 if sys.platform == "win32" else 0
+    # ⚠️ 输出别扔 DEVNULL。
+    #
+    #    原来 stdout/stderr 全是 DEVNULL。worker 挂了之后
+    #    **一点痕迹都没有** —— 任务状态停在 running，没人知道为什么。
+    #
+    #    实测：全新环境派活，worker 因为找不到模型挂掉，
+    #    而 tasks.jsonl 里状态永远 running，界面一直转圈。
+    #
+    #    现在写到 workspaces/<id>/worker.log 里，出问题能看。
+    log_path = _worker_log_path(task_id)
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        _logf = open(log_path, "ab")
+    except OSError:
+        _logf = subprocess.DEVNULL
+
     try:
         subprocess.Popen(
             [sys.executable, os.path.join(BRIDGE_DIR, "core", "bridge.py"),
              "run", "--id", task_id, "--timeout", "1800"],
             cwd=BRIDGE_DIR,
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=_logf,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             creationflags=flags,
         )
-    except OSError:
-        pass
+    except OSError as e:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[scheduler] 起不来：{e}\n")
+        except OSError:
+            pass
+    finally:
+        # 父进程这边不用持有它，子进程会继承句柄
+        if _logf not in (None, subprocess.DEVNULL):
+            try:
+                _logf.close()
+            except OSError:
+                pass
 
 
 def pump() -> int:

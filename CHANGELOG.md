@@ -4,6 +4,294 @@
 
 ---
 
+## 1.3.3 — 2026-11-02
+
+**这一版是：真的能在 Linux 上跑。**
+
+上一版的 CI 里已经有 ubuntu-latest 了，那等于公开承诺支持 Linux。
+但承诺和真做到是两件事 —— 这一版是在**真的 Linux 上**跑过来的。
+
+### 一、Linux：配置目录按平台走各自的规矩
+
+**问题**：全项目 18 处这样写：
+
+```python
+base = os.environ.get("APPDATA") or os.path.expanduser("~")
+os.path.join(base, "dsh-bridge", "xxx.json")
+```
+
+Windows 上对（`%APPDATA%\dsh-bridge\`）。
+Linux 上 `APPDATA` 不存在 → 退到 `~` → **`~/dsh-bridge/`**。
+
+也就是配置散落在家目录的**根**下面。这不合 Linux 的规矩：
+家目录是用户自己的地方，程序不该往那儿扔文件夹。
+
+**实测（WSL2 Ubuntu 24.04.5）**：
+
+```
+token 生成在 /root/dsh-bridge/api_token.txt
+而 status.sh 去 /root/.config/dsh-bridge/ 找 → 找不到
+端到端测试拿不到 token → 派活 401
+```
+
+**修法**：新增 `tools/userdirs.py`，各平台走各自的规矩：
+
+```
+Windows   %APPDATA%\dsh-bridge\
+macOS     ~/Library/Application Support/dsh-bridge/
+Linux     $XDG_CONFIG_HOME/dsh-bridge/   默认 ~/.config/dsh-bridge/
+```
+
+18 处全部换过去（10 个文件）。
+
+> ⚠️ 插件不能 import 它 —— 插件被 AstrBot 加载，
+> AstrBot 只把插件目录加进 `sys.path`，不会把仓库根加进去。
+> 所以插件那边单独写了 `plugins/_dsh_paths.py`，内容一样。
+> **有测试盯着这件事**（`test_plugin_and_core_agree`），改一边忘一边会被抓出来。
+
+### 二、Linux：三个脚本，一条命令能跑
+
+```
+./setup.sh      装依赖、建目录、生成配置模板、打印下一步
+./start.sh      起服务（前台 / --daemon / --stop）
+./status.sh     看服务在不在跑、任务在干什么、缺什么配置
+```
+
+**做这三个而不是桌面端**，是因为 Linux 桌面在中国只有 2.12%（Statcounter 2026-07），
+而愿意装 Linux 的基本都是搞技术的 —— 他们要的是一条命令能跑，不是一个界面。
+
+**实测在 WSL2 上从头跑了一遍，三个脚本退出码都是 0。**
+
+### 三、Linux：插件一行没改就能用
+
+```
+plugins/ 四个文件
+    ✅ 语法全过
+    ✅ 零 Windows 专有调用（没有 winreg / msvcrt / ctypes.windll）
+    ✅ 零硬编码路径
+    ✅ 路径靠 DSH_BRIDGE_DIR 环境变量 + 自动推测
+```
+
+**意味着：AstrBot 在 Linux 上跑起来，插件拷进去就能用，不用改。**
+
+### 四、顺手修的四个"藏了很久"的问题
+
+**都是在 Linux 上跑才露出来的，而根子不在 Linux。**
+
+```text
+一、tests/test_perm_verify.py 一直没被跑过
+
+    它是独立脚本（一个 test_ 函数都没有），但名字叫 test_*.py：
+
+        pytest 按名字收集 → 收到 0 个测试 → 跳过
+        run_all.py 的 modules 列表里 → 没有它 → 不跑
+
+    结果：14 条权限流程测试（降权免码、升权要码、错码拒绝、
+    通配符拒绝、码绑具体任务）写在那儿，一条都没执行过。
+
+    改名 perm_verify.py，并在 run_all.py 里真正跑起来。
+
+二、它在 import 时污染别的测试
+
+    两个副作用，都在模块导入阶段执行、从不恢复：
+
+        os.environ["APPDATA"] = 临时目录
+        guard.send_code_email = _fake_send
+
+    实测：python -m pytest tests/ 挂 2 条，
+    而 run_all.py（每文件单独进程）全过 —— 所以 CI 一直没发现，
+    因为 CI 用的也是 run_all.py。
+
+    修法：写 tests/conftest.py，每个测试自动隔离环境并在结束时清守卫状态。
+
+三、perm_verify.py 反过来被别人污染
+
+    它是独立脚本，继承了上一个测试留下的守卫锁定状态，
+    于是「带对码 → 生效」这一步失败（守卫还锁着，填对码也不放行）。
+
+    修法：开头和结尾都 reset_all()。
+
+四、test_concurrency.py 的 fixture 只改 APPDATA
+
+    实现改成走 userdirs 之后，Linux 上只改 APPDATA 等于没改 ——
+    测试读写的是**真实配置目录**，跟别的测试互相污染。
+
+    实测：全量跑时 test_default_profile 拿到别的测试留下的配置，
+    assert '测试' == 'B' 失败。
+
+    修法：APPDATA / LOCALAPPDATA / XDG_CONFIG_HOME 三个都隔离。
+```
+
+### 五、桌面端：修了两个让程序打不开的错
+
+**都是我加解锁 UI 时留下的，而 `py_compile` 检查不出来（它们是运行期才报的）。**
+
+```text
+一、_do_unlock 只有调用没有定义
+
+    行 2103 写了 b_unlock.clicked.connect(self._do_unlock)，
+    而 _do_unlock 不存在。
+
+    后果不是「点了没反应」，是**整个桌面端起不来**：
+        AttributeError: 'MainWindow' object has no attribute '_do_unlock'
+    因为 connect 在 _card_guard 里执行，而它在 __init__ 里 ——
+    窗口还没画出来就崩了。
+
+二、cl 未定义
+
+    补了方法之后又崩在这里：cl.addLayout(crow)
+    同一个卡片里上面用的都是 sc，我写成了 cl。
+
+另外：界面提示「后台可能还没起来，重开一下这个窗口」是误导 ——
+按 README 跑 python -m desktop.app 的人，接口服务本来就没起，
+重开一百次也一样。现在分三种情况说清楚（连不上 / token 错 / 其他）。
+
+加了 tests/test_ui_static.py 防回归：
+扫源码找「self.xxx() 有调用但没 def xxx」的私有方法。
+这类错 py_compile 拦不住，pytest 也拦不住（没人 import 界面），
+但一炸就是整个桌面端起不来。
+```
+
+### 六、桌面端：一条命令就能用
+
+**原来 `python -m desktop.app` 只开界面，不起接口服务**（那是 `start_desktop.pyw` 干的）。
+于是界面上所有数据都是空的。
+
+**现在 `main()` 里先探一下 8790，没起就自己拉一个。**
+
+**而且后台挂进 Job Object（`KILL_ON_JOB_CLOSE`）：**
+
+```
+界面进程退出 → 系统自动把后台杀掉
+```
+
+**不用裸 `subprocess.Popen`** 是因为 Windows 的进程不连坐 ——
+父进程退出，子进程照活。用户关掉窗口，后台还在跑；下次开机再开一个，
+越堆越多。这就是「任务管理器里一堆 python.exe」的来源。
+
+### 七、任务端：没配模型时不再"永远转圈"
+
+**原来全新用户派活，会这样：**
+
+```
+任务写成 running
+worker 起来
+找不到可用模型
+挂了（stderr 被 DEVNULL 吞掉）
+状态停在 running
+界面一直转圈
+新手等几分钟，关掉，卸载
+```
+
+**修了三处：**
+
+```text
+一、engine/profiles.py 的 default_profile()
+    没一套能用的时候，它返回一套**没配好的**。
+    调用方以为拿到了能用的，实际是个残废。
+    现在默认只返回能用的（require_ready=True）。
+
+二、api_server 派活前检查
+    没有可用配置 → 直接回 400 + 一句人话：
+        "还没有能用的模型，活派出去也跑不了。"
+        "去「设置」页点「＋ 新增模型」，填接口地址、API Key、模型名..."
+
+三、worker 的输出不扔 DEVNULL 了，写到 workspaces/<id>/worker.log
+```
+
+**前端也修了**：原来对 `/api/dispatch` 的返回什么都不看，只 refresh ——
+新手点了按钮什么反应都没有。现在弹窗 + 一个「去设置」按钮。
+
+### 八、run_command 的超时终于真的生效
+
+**原来设 5 秒，实际跑 120 秒。**
+
+```text
+根因：
+    subprocess.run(timeout=) 在 Windows 上只杀直接子进程（cmd.exe），
+    然后 join 两个读管道的线程 ——
+    而那两个管道的句柄被孙进程继承着，孙进程不退出，join 就永远等。
+
+修法：
+    Windows   Job Object + TerminateJobObject，整棵树一起死
+    POSIX     start_new_session + killpg
+
+实测：
+    命令是 python child.py（里面 sleep 120）
+    设 5 秒 → 实际 5.1 秒，子进程也一起没了
+```
+
+**这个坑踩过两次**（还有一次是 `timeout=3` 跑了 34.4 秒）。
+
+### 九、写死的路径全清了
+
+**桌面端能配五个路径，代码里就不该留默认地址。**
+
+```
+删掉的：
+    desktop/paths.py    D:\qqaibot\napcat / astrbot / .bot_runtime
+    server/api_server   D:\qqaibot\napcat（二维码兜底）
+    guard/guard_git     D:\Project
+    tools/deps          D:\qqaibot\astrbot / C:\astrbot
+
+现在的探测顺序：
+    一、用户配的（配置文件）
+    二、环境变量 QQAIBOT_HOME
+    三、通用位置（%USERPROFILE% / %LOCALAPPDATA% / %APPDATA% / Program Files）
+    四、都没有 → 返回空，界面让用户自己选
+```
+
+### 十、说清楚支持哪些聊天软件
+
+**代码一行没删 —— QQ 通道在 Windows 上还能用。**
+
+**要改的是说法。原来项目读起来像是「支持 QQ 和飞书」，
+两个摆在一起，看不出它们的差别有多大。**
+
+**实际上差别是**风险归谁**：**
+
+```text
+官方接口（飞书 / 钉钉 / 企微 / KOOK / Telegram / Discord / Slack）
+    公开文档、有审核、有条款
+    出事找平台，因为那是正规用法
+
+QQ 个人号（NapCat 注入 QQ 客户端）
+    依赖 QQ 内部结构，QQ 一升级就可能断
+    绕过官方接口，条款上属于灰区，账号风险由用户承担
+    只能在 Windows 上跑
+```
+
+**README 新增「接哪些聊天软件」一节，并写明决定：**
+**新增的平台只往官方接口那边加，QQ 不再扩展。**
+
+**理由：**
+
+> 一个开源项目让人 clone 下来用，
+> 用的人应该承担「配置错了」的风险，
+> 不该承担「这个项目走的可能是灰区」的风险。
+
+### 结果
+
+```text
+Windows   373 通过 / 0 失败
+Linux     367 通过 / 0 失败
+
+差的 6 个是 Windows 特有的测试（盘符、UNC、ADS、CON/NUL、
+以及依赖 QQ/NapCat/Sandboxie 的端到端），跳过是对的。
+```
+
+**CI：四个平台全绿（windows/ubuntu × py3.11/3.12）。**
+
+### 还没做的
+
+```text
+· macOS / 鸿蒙  —— 没有环境，也没验证过
+· Linux 上接飞书 —— AstrBot 和插件都验证过能跑，
+                    但没在 Linux 上完整走一遍"飞书说句话 → 电脑干活 → 发回飞书"
+· 桌面端在 Linux 上 —— 不做。理由见上面第二节。
+```
+
+
 ## 1.3.2 — 2026-11-01
 
 **这一版才是能用的 1.3.2。** 上一次那个 1.3.2 的号已经作废（见上一条）。

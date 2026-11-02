@@ -43,6 +43,9 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 # 验证码有效期（秒）。
 #
 # 用户定的：120 秒。短信验证码通常是 5 分钟，但这里是本机操作，
@@ -241,8 +244,7 @@ _force_locked: dict[str, float] = {}
 
 
 def _lock_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "dsh-bridge", "lock_state.json")
+    return _userdirs.config_file("lock_state.json")
 
 
 def _load_state() -> dict:
@@ -663,10 +665,7 @@ def check(task: str) -> dict:
 
 
 def _cfg_path() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "dsh-bridge")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "guard.json")
+    return _userdirs.config_file("guard.json")
 
 
 def load_config() -> dict:

@@ -634,6 +634,173 @@ def _usable_temp() -> str:
     # 全都不行：交给系统自己挑（可能也失败，但至少不是我们硬塞的）
     return _tf.gettempdir()
 
+# ══════════════════════════════════════════════════════
+# 进程树超时控制
+# ══════════════════════════════════════════════════════
+#
+# ⚠️ 为什么不能用 subprocess.run(timeout=)：
+#
+#     它在 Windows 上只杀**直接子进程**（cmd.exe），
+#     然后 join 两个读管道的线程 —— 而那两个管道的句柄
+#     被孙进程继承着，孙进程不退出，join 就永远等。
+#
+#     实测：命令是 python child.py（里面 sleep 120），
+#          timeout=5 → 实际 120.3 秒才返回。
+#          也就是说超时形同虚设。
+#
+#     同一个坑踩过两次（还有一次是 timeout=3 跑了 34 秒），
+#     所以这次做成显式的、带注释的、有测试的。
+#
+# 做法：
+#     Windows   Job Object + KILL_ON_JOB_CLOSE
+#               把 cmd 挂进 Job，它起的子进程自动也进 Job；
+#               超时调 TerminateJobObject，整棵树一起死。
+#     POSIX     start_new_session + killpg
+
+
+class _JobTree:
+    """把子进程挂进一个 Job（Windows）/ 进程组（POSIX），能整棵杀掉。"""
+
+    def __init__(self):
+        self._job = None
+        self._proc = None
+        self.is_windows = sys.platform == "win32"
+
+    # ── Windows ──
+    def _win_make_job(self):
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+        info.BasicLimitInformation.LimitFlags = 0x2000
+        ok = kernel32.SetInformationJobObject(
+            job,
+            9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(job)
+            return None
+        return job
+
+    def _win_assign(self, job, pid: int) -> bool:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # PROCESS_ALL_ACCESS
+        handle = kernel32.OpenProcess(0x1F0FFF, False, pid)
+        if not handle:
+            return False
+        try:
+            return bool(kernel32.AssignProcessToJobObject(job, handle))
+        finally:
+            kernel32.CloseHandle(handle)
+
+    # ── 对外 ──
+    def spawn(self, argv, **kw):
+        import subprocess
+
+        if self.is_windows:
+            job = self._win_make_job()
+            # 先建进程再挂 Job —— 中间有个极短的窗口期，
+            # 但 CreateProcess 那一刻还没跑起来，够用。
+            p = subprocess.Popen(argv, **kw)
+            if job and not self._win_assign(job, p.pid):
+                import ctypes
+
+                ctypes.WinDLL("kernel32").CloseHandle(job)
+                job = None
+            self._job = job
+            self._proc = p
+            return p
+
+        kw.setdefault("start_new_session", True)
+        p = subprocess.Popen(argv, **kw)
+        self._proc = p
+        return p
+
+    def kill_tree(self) -> None:
+        """把整棵树杀掉。已经有进程退了也无所谓。"""
+        p = self._proc
+        if p is None:
+            return
+        if self.is_windows and self._job:
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            # TerminateJobObject 会把 Job 里所有进程都终止
+            if not kernel32.TerminateJobObject(self._job, 1):
+                # 退路：至少杀掉直接子进程
+                try:
+                    p.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+        # POSIX：整组杀
+        try:
+            import os as _os
+            import signal as _sig
+
+            _os.killpg(_os.getpgid(p.pid), _sig.SIGKILL)
+        except Exception:  # noqa: BLE001
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def close(self) -> None:
+        """收尸。Job 句柄一关，KILL_ON_JOB_CLOSE 会兜底杀掉漏网的。"""
+        if self.is_windows and self._job:
+            try:
+                import ctypes
+
+                ctypes.WinDLL("kernel32").CloseHandle(self._job)
+            except Exception:  # noqa: BLE001
+                pass
+            self._job = None
+
 def _run_on_windows(command: str, work_dir: str, env: dict, timeout: int):
     """Windows 上跑一条命令，用"写文件再执行"的方式保住中文。
 
@@ -693,22 +860,43 @@ def _run_on_windows(command: str, work_dir: str, env: dict, timeout: int):
             f.write(command)
             f.write("\r\n")
 
+        _to = _effective_timeout(timeout)
+        _tree = _JobTree()
         try:
-            return subprocess.run(
+            _p = _tree.spawn(
                 ["cmd", "/c", "chcp 65001 >nul & call " + bat],
                 cwd=work_dir,
                 env=env,
-                capture_output=True,
-                timeout=_effective_timeout(timeout),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 creationflags=_nowindow_flags(),
             )
-        except subprocess.TimeoutExpired:
-            return None
         except OSError as e:
+            _tree.close()
             r = _Result()
             r._start_failed = True
             r._err = str(e)
             return r
+
+        try:
+            # ⚠️ 自己等，不用 p.communicate(timeout=)：
+            #    那个超时只杀直接子进程，然后 join 读管道的线程，
+            #    被孙进程卡住（实测 5 秒变 120 秒）。
+            #    这里到点直接 kill_tree()，整棵树一起死。
+            _out, _err2 = _p.communicate(timeout=_to)
+            # 返回跟 subprocess.run 一样的形状
+            # （.returncode / .stdout / .stderr 都是 bytes）
+            return _Result(_p.returncode, _out or b"", _err2 or b"")
+        except subprocess.TimeoutExpired:
+            _tree.kill_tree()
+            try:
+                _p.communicate(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        finally:
+            _tree.close()
     finally:
         try:
             os.remove(bat)

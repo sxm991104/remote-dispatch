@@ -34,15 +34,37 @@ def clean_profiles():
     import engine.profiles as P
 
     with tempfile.TemporaryDirectory() as d:
-        old = os.environ.get("APPDATA")
+        # ⚠️ 要改的不只是 APPDATA。
+        #
+        #    原来这里只改 APPDATA，但实现后来改成走 tools/userdirs：
+        #         Windows  看 APPDATA
+        #         Linux    看 XDG_CONFIG_HOME / ~/.config
+        #         macOS    看 ~/Library/Application Support
+        #
+        #    所以只改 APPDATA 在 Linux 上等于没改 —— 测试读写的是
+        #    **真实配置目录**，跟别的测试互相污染。
+        #
+        #    实测（WSL2 Ubuntu 24.04）：
+        #        python -m pytest tests/ 全量跑时，
+        #        test_default_profile 拿到的是别的测试留下的配置，
+        #        assert '测试' == 'B' 失败。
+        #
+        #    三个都改，哪个平台都对。
+        saved = {
+            k: os.environ.get(k)
+            for k in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME")
+        }
         os.environ["APPDATA"] = d
+        os.environ["LOCALAPPDATA"] = os.path.join(d, "local")
+        os.environ["XDG_CONFIG_HOME"] = d
         try:
             yield d
         finally:
-            if old:
-                os.environ["APPDATA"] = old
-            else:
-                os.environ.pop("APPDATA", None)
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 def test_add_and_load(clean_profiles: str) -> None:
@@ -128,8 +150,14 @@ def test_enabled_only(clean_profiles: str) -> None:
 def test_migration_from_old_format() -> None:
     """老格式（单套配置）能自动升级成多套。"""
     with tempfile.TemporaryDirectory() as d:
-        old = os.environ.get("APPDATA")
+        # 跟上面一样：三个环境变量都要改，见 clean_profiles 的说明。
+        saved = {
+            k: os.environ.get(k)
+            for k in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME")
+        }
         os.environ["APPDATA"] = d
+        os.environ["LOCALAPPDATA"] = os.path.join(d, "local")
+        os.environ["XDG_CONFIG_HOME"] = d
         try:
             os.makedirs(os.path.join(d, "dsh-bridge"), exist_ok=True)
             old_cfg = {
@@ -145,8 +173,11 @@ def test_migration_from_old_format() -> None:
             assert data["profiles"][0]["model"] == "deepseek-chat"
             assert data["profiles"][0]["api_key"] == "sk-old"
         finally:
-            if old:
-                os.environ["APPDATA"] = old
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 # ══════════════════════════════════════════════════════

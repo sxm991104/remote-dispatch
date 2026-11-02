@@ -157,8 +157,7 @@ def check_all() -> list[dict]:
 
 def _astrbot_paths_file() -> str:
     """用户手动指定的 AstrBot 路径存在这。"""
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "dsh-bridge", "paths.json")
+    return _userdirs.config_file("paths.json")
 
 
 def load_custom_paths() -> dict:

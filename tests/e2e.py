@@ -47,6 +47,8 @@ except ImportError:
     from tools.console import mark_utf8 as _mark_utf8
 _mark_utf8()
 
+from tools import userdirs  # noqa: E402
+
 # ⚠️ 必须在任何 print 之前把 stdout 换成 UTF-8。
 #
 #    Windows CI 上 python 的默认 stdout 编码是 cp1252（英文系统），
@@ -369,11 +371,11 @@ class Service:
         url = f"http://127.0.0.1:{self.port}{path}"
         headers = {"Content-Type": "application/json"}
         # token 在用户目录，服务起来时已经生成了
-        tp = os.path.join(
-            os.environ.get("APPDATA") or os.path.expanduser("~"),
-            "dsh-bridge",
-            "api_token.txt",
-        )
+        # token 在配置目录，服务起来时已经生成了
+        # ⚠️ 走 tools/userdirs，不要自己拼路径。
+        #    原来这里写的是 APPDATA or "~" —— 在 Linux 上会拼到
+        #    ~/dsh-bridge/，而服务实际把 token 写在 ~/.config/dsh-bridge/。
+        tp = userdirs.config_file("api_token.txt")
         if os.path.exists(tp):
             headers["X-Token"] = open(tp, encoding="utf-8").read().strip()
 

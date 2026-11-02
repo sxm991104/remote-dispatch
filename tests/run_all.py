@@ -88,6 +88,10 @@ def main() -> int:
         ("并发与调度", "tests/test_concurrency.py"),
         ("产出文件", "tests/test_outputs.py"),
         ("压力测试", "tests/test_stress.py"),
+        # 静态检查：桌面端有没有"调用了但没定义"的方法。
+        # 这类错 py_compile 拦不住（语法是对），pytest 也拦不住（没人 import 界面），
+        # 但一炸就是整个桌面端打不开。2026-11-02 一天里犯了两次。
+        ("界面静态检查", "tests/test_ui_static.py"),
     ]
 
     total_pass = 0
@@ -254,6 +258,40 @@ def main() -> int:
                 print(f"    {line.strip()}")
         if r.returncode != 0:
             failed_modules.append("暴力攻击")
+
+    # ── 权限验证（改权限要过验证码）──
+    #
+    # ⚠️ 这一节以前**从来没被跑过**。
+    #
+    #    它原来叫 tests/test_perm_verify.py，是独立脚本（一个 test_ 函数都没有）。
+    #    pytest 按 test_*.py 命名去收集它 → 收到 0 个测试 → 跳过；
+    #    而这个列表里又没它 → run_all 也不跑。
+    #
+    #    结果：14 条权限流程测试（降权免码、升权要码、错码拒绝、
+    #    通配符拒绝、码绑具体任务）一直写在那儿，一条都没执行过。
+    #
+    #    而它还顺手改了 guard.send_code_email 从不恢复，
+    #    污染了 pytest 全量跑时的其他测试（2026-11-02 才发现）。
+    #
+    #    现在改名叫 perm_verify.py（不再被 pytest 误收集），
+    #    并在这里真正跑起来。
+    print(f"\n{'-' * 66}")
+    print("  权限验证")
+    print(f"{'-' * 66}")
+
+    pv = os.path.join(ROOT, "tests", "perm_verify.py")
+    if os.path.exists(pv):
+        r = subprocess.run(
+            [sys.executable, pv],
+            cwd=ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        for _line in (r.stdout or "").splitlines():
+            _s = _line.strip()
+            if "结果：" in _s or _s.startswith("❌"):
+                print(f"  {_s}")
+        if r.returncode != 0:
+            failed_modules.append("权限验证")
 
     # ── 端到端（真起进程、真派活）──
     #

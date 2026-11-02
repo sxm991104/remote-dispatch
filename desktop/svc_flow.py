@@ -41,6 +41,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 API = "http://127.0.0.1:8790"
 
 
@@ -60,8 +63,7 @@ def _token() -> str:
     """
     import os
 
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    p = os.path.join(base, "dsh-bridge", "api_token.txt")
+    p = _userdirs.config_file("api_token.txt")
     try:
         if os.path.exists(p):
             return open(p, encoding="utf-8").read().strip()

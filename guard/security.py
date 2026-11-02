@@ -34,6 +34,9 @@ from __future__ import annotations
 import os
 import secrets
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 # 绑死的地址。不给命令行参数、不给配置项——就是这么定的。
 HOST = "127.0.0.1"
 
@@ -46,9 +49,7 @@ def token_path(app_dir: str) -> str:
     放 %APPDATA%\\dsh-bridge\\ 里，只有当前用户能读。
     不放程序目录——程序目录可能被同步、被备份、被发出去。
     """
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, app_dir)
-    os.makedirs(d, exist_ok=True)
+    d = _userdirs.config_dir(app_dir)
     return os.path.join(d, TOKEN_FILENAME)
 
 

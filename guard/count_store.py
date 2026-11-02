@@ -64,11 +64,13 @@ import tempfile
 import threading
 import time
 
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
 # ── 文件位置 ────────────────────────────────────────────
 
 def _root() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "dsh-bridge")
+    return _userdirs.config_dir()
 
 
 def _local_root() -> str:

@@ -67,7 +67,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-API = "http://127.0.0.1:8790"
+# 各平台该把配置放哪儿，见 tools/userdirs.py
+import tools.userdirs as _userdirs
+
+# ⚠️ 端口只在这里写一次。
+#
+#    原来 8790 在文件里出现了四次（URL、提示文案、两处 _port_open），
+#    而 _spawn_backend 起后台时又不传 --port，靠 api_server 自己的默认值。
+#    等于**同一个数字写了两份**，改一处就分家 —— 界面找 A、后台听 B。
+#
+#    现在：只这一个常量，起后台时显式传过去。
+_API_PORT = int(os.environ.get("DSH_BRIDGE_PORT") or 8790)
+API = f"http://127.0.0.1:{_API_PORT}"
 
 # 启动/扫码这套流程放在 desktop/svc_flow.py 里，
 # 因为它和主界面是两套节奏：主界面每 3 秒刷一次任务，
@@ -164,8 +175,7 @@ def _read_api_token() -> str:
     """
     import os
 
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    p = os.path.join(base, "dsh-bridge", "api_token.txt")
+    p = _userdirs.config_file("api_token.txt")
     try:
         if os.path.exists(p):
             return open(p, encoding="utf-8").read().strip()
@@ -1186,7 +1196,14 @@ class MainWindow(QMainWindow):
         self.nav_btns[0].setChecked(True)
 
         lay.addStretch()
-        ver = QLabel("v1.3.2")
+        # ⚠️ 版本号读 VERSION 文件，别写死。
+        #
+        #    原来这里是 QLabel("v1.3.2") —— 每次发版都要记得改这里，
+        #    忘了界面上就一直显示旧版本号，用户会以为没更新。
+        #
+        #    现在从仓库根的 VERSION 读。读不到就显示 "dev"，
+        #    至少不会显示一个错的版本。
+        ver = QLabel(_app_version())
         ver.setFont(font(10))
         ver.setStyleSheet(f"color:{C_DIM2}; padding:0 16px;")
         lay.addWidget(ver)
@@ -1683,8 +1700,17 @@ class MainWindow(QMainWindow):
         )
 
         for key, title, desc in (
-            ("qq", "QQ 通道", "要拉 QQ 客户端，比较占内存。不用 QQ 就关掉"),
-            ("feishu", "飞书通道", "纯网络连接，很轻，几秒钟就能开"),
+            # ⚠️ 顺序和措辞有讲究：
+            #
+            #    官方接口的平台排前面（飞书、以后还有钉钉之类），
+            #    QQ 排后面，而且标题里带「社区方案」——
+            #
+            #    因为 QQ 那条路靠 NapCat 往 QQ 进程注入 DLL，
+            #    依赖客户端内部结构、条款上是灰区。
+            #    用户该知道这两类的差别，而不是看成一排等价的选择。
+            ("feishu", "飞书通道", "官方接口，纯网络连接，很轻，几秒钟就能开"),
+            ("qq", "QQ 通道（社区方案）",
+             "靠 NapCat 注入 QQ 客户端，占内存；依赖 QQ 版本，有风控风险"),
             ("bridge", "任务端", "真正在电脑上干活的那个，跟通道无关"),
         ):
             card = ServiceCard(key, title, desc)
@@ -2081,7 +2107,7 @@ class MainWindow(QMainWindow):
         ghint.setWordWrap(True)
         sc.addWidget(ghint)
 
-                # ⚠️ 验证码输入框。
+        # ⚠️ 验证码输入框。
         #
         #    原来这块只有一句说明，**没有输入框、没有按钮**。
         #    而锁死之后唯一的出路就是填一个验证码——
@@ -2103,16 +2129,57 @@ class MainWindow(QMainWindow):
         b_unlock.clicked.connect(self._do_unlock)
         crow.addWidget(b_unlock)
         crow.addStretch()
-        cl.addLayout(crow)
+        sc.addLayout(crow)
 
         self.lbl_unlock_msg = QLabel("")
         self.lbl_unlock_msg.setFont(font(10.5))
         self.lbl_unlock_msg.setStyleSheet(f"color:{C_DIM2};")
         self.lbl_unlock_msg.setWordWrap(True)
-        cl.addWidget(self.lbl_unlock_msg)
+        sc.addWidget(self.lbl_unlock_msg)
 
         lay.addWidget(scard)
 
+
+    def _do_unlock(self) -> None:
+        """填验证码解锁。
+
+        ⚠️ 这个方法曾经**只有调用没有定义**：
+            行 2103 写了 b_unlock.clicked.connect(self._do_unlock)，
+            而 _do_unlock 不存在。
+
+            后果不是「点了没反应」，是**整个桌面端起不来** ——
+                AttributeError: 'MainWindow' object has no attribute '_do_unlock'
+            因为 connect 是在 _card_guard 里执行的，
+            而 _card_guard 在 __init__ 里，窗口还没画出来就崩了。
+
+            实测：全新 clone + 全新用户目录，python -m desktop.app
+            退出码 1，连个窗口都没有。
+
+        py_compile 检查不出这类问题（运行期才报），
+        所以只能**真的启动一次**才看得见。
+        """
+        code = self.ed_unlock_code.text().strip()
+        if not code:
+            self.lbl_unlock_msg.setText("先把邮件里的验证码填上")
+            return
+
+        def done(data):
+            if isinstance(data, dict) and data.get("ok"):
+                self.lbl_unlock_msg.setText(data.get("message") or "解开了")
+                self.ed_unlock_code.clear()
+                # 解开之后守卫状态变了，把卡片刷一遍
+                self.api.get("/api/guard")
+            else:
+                self.lbl_unlock_msg.setText(
+                    (data or {}).get("message")
+                    or (data or {}).get("error")
+                    or "码不对，或者过期了"
+                )
+
+        self.lbl_unlock_msg.setText("验证中…")
+        self.api.request_once(
+            "/api/guard/unlock", {"code": code}, timeout=30, callback=done
+        )
 
     def _card_autostart(self, lay: QVBoxLayout) -> None:
         """设置页 · 启动行为卡（开机自启）。"""
@@ -2450,7 +2517,58 @@ class MainWindow(QMainWindow):
                 f"现在用的是：{data.get('provider_now')} / {data.get('model_now')}"
             )
         elif path in ("/api/dispatch", "/api/continue", "/api/cancel"):
+            # ⚠️ 这里原来只有一句 self.refresh()。
+            #
+            #    后端拒绝派活时会回 {"error": ..., "hint": ..., "code": ...}，
+            #    而这里什么都不看，直接刷新列表 ——
+            #    新手看到的就是「点了按钮，什么都没发生」。
+            #
+            #    实测：全新环境点派活 → 后端说没有可用模型 →
+            #    前端无反应 → 用户完全不知道该怎么办。
+            self._show_action_error(path, data)
             self.refresh()
+
+    def _show_action_error(self, path: str, data) -> None:
+        """把「派活没成」的原因告诉用户。
+
+        ⚠️ 为什么会需要这个方法：
+
+            原来前端对 /api/dispatch 的返回**什么都不看**，只 refresh。
+            而后端拒绝时回的是 error + hint，
+            新手看到的就是「点了按钮，什么都没发生」。
+
+            而他真正缺的可能是：没加模型、名字重了、被闸门拦了……
+            每种情况的下一步都不一样，必须说出来。
+        """
+        if not isinstance(data, dict):
+            return
+
+        err = str(data.get("error") or "").strip()
+        if not err:
+            return
+
+        hint = str(data.get("hint") or "").strip()
+        code = str(data.get("code") or "").strip()
+
+        # 没有模型：给一个「去设置」按钮，别让用户自己找
+        if code == "no_model":
+            box = QMessageBox(self)
+            box.setWindowTitle("还差一步")
+            box.setIcon(QMessageBox.Information)
+            box.setText(err)
+            if hint:
+                box.setInformativeText(hint)
+            b_go = box.addButton("去设置", QMessageBox.AcceptRole)
+            box.addButton("知道了", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_go:
+                # 任务 / 服务 / 环境 / 设置 —— 设置是第 3 个（从 0 数）
+                self.stack.setCurrentIndex(3)
+            return
+
+        # 其他情况：原因和提示都摆出来
+        msg = err if not hint else f"{err}\n\n{hint}"
+        QMessageBox.warning(self, "没成", msg)
 
     def _render_tasks(self) -> None:
         """每个模型一个 tab，tab 下面列它名下的任务。
@@ -2837,11 +2955,43 @@ class MainWindow(QMainWindow):
 
         if not getattr(self, "_profiles", None):
             err = getattr(self, "_profile_error", "")
-            lb = QLabel(
-                f"读不到配置：{err}（后台可能还没起来，重开一下这个窗口）"
-                if err else
-                "还没有模型。点下面「＋ 新增模型」。"
-            )
+
+            # ⚠️ 这句提示原来写的是「后台可能还没起来，重开一下这个窗口」。
+            #
+            #    实测：按 README 跑 python -m desktop.app 的人，
+            #    界面开了但接口服务没人起（那是 start_desktop.pyw 干的）。
+            #    于是这句提示一直挂着，用户就一直重开窗口 ——
+            #    **重开一百次也一样**，因为缺的不是窗口，是后台进程。
+            #
+            #    所以分成三种情况说清楚：
+            #      连不上   → 告诉他们接口服务没起，给出两条起法
+            #      token 错 → 那是另一个问题（通常是后台残留旧 token）
+            #      其他     → 原样显示，别瞎猜
+            _msg = ""
+            if err:
+                low = err.lower()
+                if "token" in low:
+                    _msg = (
+                        f"后台认不出这个窗口的令牌：{err}\n"
+                        "通常是后台进程是旧的（换了 token 但没重启）。"
+                        "把桌面端关掉重开一次；还不行就在任务管理器里"
+                        "结束 python 进程再打开。"
+                    )
+                elif "timed out" in low or "拒绝" in err or "refused" in low \
+                        or "urlopen" in low or "connect" in low:
+                    _msg = (
+                        f"连不上后台（127.0.0.1:{_API_PORT}）。\n"
+                        "界面和后台是两个进程，刚才那个命令只开了界面。\n"
+                        "两种起法：\n"
+                        "  一、双击 start_desktop.pyw（会先把后台拉起来）\n"
+                        "  二、另开一个窗口跑 python -m server.api_server"
+                    )
+                else:
+                    _msg = f"读不到配置：{err}"
+            else:
+                _msg = "还没有模型。点下面「＋ 新增模型」。"
+
+            lb = QLabel(_msg)
             lb.setFont(font(11))
             lb.setWordWrap(True)
             lb.setStyleSheet(
@@ -3565,7 +3715,210 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(800, self._load_model)
 
 
+# ══════════════════════════════════════════════════════
+# 后台（接口服务）的拉起与回收
+# ══════════════════════════════════════════════════════
+#
+# 为什么界面要自己拉后台：
+#
+#     实测：按 README 跑 python -m desktop.app 的人，
+#     界面开了但接口服务没人起。于是界面上所有数据都是空的，
+#     提示还写着「重开一下这个窗口」—— 重开一百次也一样。
+#
+#     一条命令就该能干完一件事。
+#
+# 为什么不裸起：
+#
+#     Windows 的进程**不连坐**。父进程退出，子进程照活。
+#     用户关掉窗口，后台还在跑；下次开机再开一个 —— 越堆越多。
+#     这就是「任务管理器里一堆 python.exe」的来源，
+#     普通人看到会以为是病毒。
+#
+#     用 Job Object + KILL_ON_JOB_CLOSE：
+#         把后台挂进 Job，界面进程一退出，句柄关闭，
+#         系统自动把 Job 里所有进程杀干净。一步都不用我们做。
+
+_BACKEND = None      # 我们拉起的那个后台（None 表示复用已有的）
+_BACKEND_JOB = None
+
+
+def _port_open(port: int, timeout: float = 0.5) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _make_kill_on_close_job():
+    """建一个「关闭即杀」的 Job。失败返回 None（不致命）。"""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class BASIC(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class EXT(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BASIC),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = EXT()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(
+            job, 9, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            k32.CloseHandle(job)
+            return None
+        return job
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _assign_to_job(job, pid: int) -> bool:
+    try:
+        import ctypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1F0FFF, False, pid)
+        if not h:
+            return False
+        try:
+            return bool(k32.AssignProcessToJobObject(job, h))
+        finally:
+            k32.CloseHandle(h)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _spawn_backend() -> bool:
+    """把接口服务拉起来。已有一个就不动它。成功返回 True。"""
+    global _BACKEND, _BACKEND_JOB
+    import subprocess
+    import time
+
+    if _port_open(_API_PORT):
+        # 已经有人听 —— 复用，不杀不抢
+        return True
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    api_py = os.path.join(here, "server", "api_server.py")
+    if not os.path.exists(api_py):
+        return False
+
+    # 用 pythonw 起，别开黑框
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.exists(pyw):
+        pyw = sys.executable
+
+    # ⚠️ 必须显式传端口。
+    #
+    #    不传的话它用自己的 DEFAULT_PORT，而这个文件里的端口是另一个常量 ——
+    #    两个数一旦不一致，界面就在找一个没人听的端口。
+    #    端口冲突时也一样：后台起不来，界面永远转圈。
+    flags = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        _BACKEND = subprocess.Popen(
+            [pyw, api_py, "--port", str(_API_PORT)],
+            cwd=here,
+            # 输出别丢：起不来的时候要看它说了什么
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+    except OSError as _e:
+        print(f"[ui] 起后台失败：{_e}", file=sys.stderr)
+        return False
+
+    # 挂进 Job：界面退出 → 系统自动杀掉它
+    _BACKEND_JOB = _make_kill_on_close_job()
+    if _BACKEND_JOB and not _assign_to_job(_BACKEND_JOB, _BACKEND.pid):
+        # 挂不上不是致命问题，但记一笔
+        print("[ui] 后台没能挂进 Job，关窗口后它可能还在跑", file=sys.stderr)
+
+    # 等它能响应
+    for _ in range(60):
+        time.sleep(0.4)
+        if _port_open(_API_PORT):
+            return True
+        if _BACKEND.poll() is not None:
+            break
+
+    # 没等到 —— 把后台说的话捞回来，别静默。
+    # 用户看到「界面是空的」却不知道为什么，比看到一段报错还难受。
+    _out = ""
+    try:
+        if _BACKEND.stdout is not None:
+            _out = _BACKEND.stdout.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        pass
+    if _out.strip():
+        print("[ui] 后台启动输出：", file=sys.stderr)
+        print(_out[:2000], file=sys.stderr)
+    return False
+    return False
+
+
+def _app_version() -> str:
+    """从仓库根的 VERSION 读版本号。
+
+    ⚠️ 原来版本号是写死在界面代码里的（QLabel("v1.3.2")）。
+       每次发版都得记得改那一行，忘了用户就看到旧版本号。
+
+    现在只维护 VERSION 一个文件。
+    读不到就返回 "dev" —— 至少不会显示一个可能是错的版本。
+    """
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(here, "VERSION"), encoding="utf-8") as f:
+            v = f.read().strip()
+        return f"v{v}" if v else "dev"
+    except OSError:
+        return "dev"
+
+
 def main() -> int:
+    # 先保证后台在跑。失败也继续开界面 ——
+    # 界面自己会提示「连不上后台」，比直接打不开好。
+    if not _spawn_backend():
+        print("[ui] 后台没起来，界面会是空的", file=sys.stderr)
+
     app = QApplication(sys.argv)
     app.setApplicationName("dsh-bridge")
     w = MainWindow()

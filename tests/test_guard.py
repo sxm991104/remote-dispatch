@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tools import userdirs  # noqa: E402
 from guard import guard  # noqa: E402
 
 
@@ -42,7 +43,8 @@ def _reset() -> None:
     #        → 测试互相污染，跑起来一半是假失败
     try:
         lp = os.path.join(
-            os.environ.get("APPDATA") or os.path.expanduser("~"),
+            # 走 userdirs，跟实现保持一致
+        userdirs.config_dir(),
             "dsh-bridge",
             "lock_state.json",
         )
