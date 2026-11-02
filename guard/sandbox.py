@@ -50,12 +50,19 @@ BOX_NAME = "RemoteDispatch"
 
 # 沙箱里断网的那一行。
 #
-# ⚠️ 这是**软隔离**（用户态挂钩）—— 恶意程序能绕。
+# ⚠️ 键名踩过坑，写清楚：
 #
-#    为什么还要写：至少挡掉不走心的绕过。
-#    硬隔离要 [GlobalSettings] 的 NetworkEnableWFP=y，
-#    那是全局配置、要重启，不替用户改 —— 见 guard/netguard.py。
-_NET_BLOCK = "AllowNetworkAccess=n"
+#    第一版写的是 AllowNetworkAccess=n —— 看着对（文档里确实有这个键），
+#    但 **Sandboxie 重新加载配置时会把这一行删掉**，因为它不是沙箱段能用的键。
+#
+#    实测（2026-11-03）：
+#        写 AllowNetworkAccess=n → 重启后这一行消失 → 沙箱里 curl 还是 200
+#        改成 NetworkAccess=*,Block → 沙箱里 curl 变成 000（连不上）✅
+#
+#    两个键的区别：
+#        NetworkAccess=*,Block    规则引擎：所有程序所有端口一律阻断
+#        AllowNetworkAccess=n     WFP 层另一个总闸，只在特定上下文生效
+_NET_BLOCK = "NetworkAccess=*,Block"
 
 _install_cache: str | None = None
 _install_checked = False

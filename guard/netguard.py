@@ -53,9 +53,16 @@ import sys
 WFP_SECTION = "[GlobalSettings]"
 WFP_KEY = "NetworkEnableWFP"
 
-# 沙箱里断网的那一行
-BOX_KEY = "AllowNetworkAccess"
-BOX_VAL = "n"
+# 沙箱里断网的那一行。
+#
+# ⚠️ 键名踩过坑：第一版写的是 AllowNetworkAccess=n，
+#    Sandboxie 重新加载时不认它，直接把这行删掉 ——
+#    配置看着写进去了，实际一点用没有（沙箱里 curl 还是 200）。
+#
+#    正确的是 NetworkAccess=*,Block。
+#    实测改成这个之后，沙箱里 curl 从 200 变成 000。
+BOX_KEY = "NetworkAccess"
+BOX_VAL = "*,Block"
 
 
 def _ini_path() -> str:
@@ -140,7 +147,10 @@ def box_has_network_block() -> bool:
     for ln in m.group(1).splitlines():
         s = ln.strip()
         if s.lower().startswith(BOX_KEY.lower() + "="):
-            return s.split("=", 1)[1].strip().lower() in ("n", "no", "false", "0")
+            val = s.split("=", 1)[1].strip().lower()
+            # 值长这样：*,Block  或者  chrome.exe,Allow;Port=443
+            # 只要收尾是 Block 就算断网。
+            return val.rstrip().endswith("block")
     return False
 
 
