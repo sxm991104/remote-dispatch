@@ -1151,6 +1151,50 @@ def discard_pending_deletes() -> None:
     _PENDING_DELETES = []
 
 
+def _net_fallback_allowed() -> tuple[bool, str]:
+    """沙箱不可用时，能不能退回普通执行（有网）。
+
+    返回 (能不能, 为什么)。
+
+    ⚠️ 两种"不可用"要分开，不能一刀切：
+
+        一、没装 Sandboxie
+            正常配置。允许普通执行，但要告诉用户网络那层没了。
+
+        二、装了但起不来
+            可疑。除非用户填码授权联网，否则**拒绝**。
+
+            "出事了反而更宽松"是最糟的设计：
+            装好的沙箱突然不起作用，恰恰是最该警惕的时候。
+    """
+    from guard import netguard as _ng
+
+    # 先看装的机器上断没断网 —— 决定"普通执行"到底有没有网
+    try:
+        st = _ng.status()
+        box_ok = bool(st.get("box_block"))
+    except Exception:  # noqa: BLE001
+        box_ok = False
+
+    from guard import sandbox as _sb
+
+    if not _sb.available():
+        # 没装。正常配置，允许。
+        return True, "没装 Sandboxie，网络那层不存在（这不是故障）"
+
+    # 装了。看有没有联网授权
+    from guard import netpolicy as _np
+
+    ok, left = _np.granted()
+    if ok:
+        return True, f"用户授权联网，还剩 {left // 60} 分钟"
+
+    return False, (
+        "沙箱装好了但起不来 —— 这时候不放行普通执行。"
+        "如果你确实需要联网干活，填验证码授权（默认 30 分钟）。"
+    )
+
+
 def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
                                 timeout: int):
     """在沙箱里跑。不可用返回 None，调用方退回普通执行。
@@ -1327,7 +1371,55 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
             # 而且第二条命令可能又改一遍文件。
             return _timeout_msg(command, timeout)
         if r is None:
-            # None 才是"沙箱不可用"，退回普通执行。
+            # None 才是"沙箱不可用"。
+            #
+            # ⚠️ 这里原来是**无条件**退回普通执行 ——
+            #    而普通执行有网（沙箱里是断网的）。
+            #
+            #    等于：沙箱一坏，命令就掉回能上网的模式，
+            #    而且没人知道。
+            #
+            #    现在分两种：
+            #        没装 Sandboxie   → 允许（正常配置）
+            #        装了但起不来     → 要么有联网授权，要么拒绝
+            _can, _why = _net_fallback_allowed()
+            if not _can:
+                # 自动发一个联网验证码，并通告前台。
+                #
+                # ⚠️ 为什么自动发：
+                #    用户派了活，命令被拒，他得知道"该怎么办"。
+                #    只回一句"需要授权"，他还得自己去翻设置找入口。
+                #
+                #    发码是**单向**的：码进邮箱，前台只知道"要码了"。
+                #    跟审核员那套一个路子。
+                _sent, _msg = True, ""
+                try:
+                    from guard import netauth as _na
+
+                    _sent, _msg = _na.send_code()
+                except Exception as _e:  # noqa: BLE001
+                    _sent, _msg = False, f"{type(_e).__name__}"
+
+                return (
+                    f"【需要联网授权】{_why}\n"
+                    f"命令：{command[:200]}\n"
+                    "\n"
+                    "⚠️ 这条命令**没有执行**。沙箱起不来，"
+                    "而普通执行是联网的 —— 不能默认放行。\n"
+                    + (
+                        "验证码已发到你的邮箱。回复它，"
+                        "再选一个时长（30 分钟 / 2 小时 / 8 小时）。"
+                        if _sent
+                        else f"但验证码没发出去（{_msg}）。"
+                             "去「设置 → 远程验证」把邮箱配好。"
+                    )
+                )
+            # ⚠️ 这里不用 _log_quiet —— 那是 core/bridge.py 里的，
+            #    在 engine/tools.py 里没定义。直接写 stderr。
+            try:
+                print(f"[沙箱] 不可用，退回普通执行：{_why}", file=sys.stderr)
+            except Exception:  # noqa: BLE001
+                pass
             r = _run_on_windows(command, work_dir, env, timeout)
     else:
         args = _build_args(command)

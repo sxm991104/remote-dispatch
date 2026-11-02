@@ -311,6 +311,75 @@ def _shadow_of(real_path: str) -> str:
     return ""
 
 
+def _resolve_python(command: str) -> str:
+    """把命令里的裸 `python` 换成真实解释器路径。
+
+    ⚠️ 为什么需要：
+
+        Windows 上 `python.exe` 常常是**0 字节的 App Execution Alias**
+        （在 WindowsApps 目录下）。正常环境里 Windows 会转发，
+        但 Sandboxie 沙箱里转不过去 —— 报"系统无法执行指定的程序"。
+
+        实测（2026-11-03）：
+            沙箱外   python --version  →  Python 3.14.7
+            沙箱里   python --version  →  系统无法执行指定的程序
+            沙箱里   真实路径          →  Python 3.14.7
+
+        而模型派活时最爱写 `python xxx.py`。
+
+    做法：
+        在 PATH 里找 `python.exe`，**跳过 0 字节的占位程序**，
+        找到真实的那个，把命令开头（或紧跟 && || | 之后）的
+        `python` / `python3` 换掉。
+
+    找不到就原样返回 —— 让沙箱自己报错，别编路径。
+    """
+    if sys.platform != "win32":
+        return command
+
+    def _real_python(names: tuple[str, ...]) -> str:
+        for name in names:
+            p = shutil.which(name)
+            if not p:
+                continue
+            try:
+                if os.path.getsize(p) == 0:
+                    # 占位程序，继续找
+                    continue
+            except OSError:
+                continue
+            return p
+        # which 全失败：手动扫 PATH
+        for d in (os.environ.get("PATH") or "").split(os.pathsep):
+            d = d.strip()
+            if not d:
+                continue
+            for name in names:
+                p = os.path.join(d, name)
+                try:
+                    if os.path.isfile(p) and os.path.getsize(p) > 0:
+                        return p
+                except OSError:
+                    continue
+        return ""
+
+    real = _real_python(("python.exe", "python3.exe"))
+    if not real:
+        return command
+
+    # 只换"命令开头"和"紧跟分隔符之后"的 python
+    #
+    #   ^python ...             →  换
+    #   && python ...           →  换
+    #   | python ...            →  换
+    #   pip install python-docx →  不换（前面不是分隔符）
+    pat = re.compile(
+        r"(^|&&|\|\||\||&|\r?\n)\s*(python3?)(?=\s|$)",
+        re.IGNORECASE,
+    )
+    return pat.sub(lambda m: f"{m.group(1)} {real}", command)
+
+
 def run_in_box(
     command: str,
     cwd: str,
@@ -339,6 +408,12 @@ def run_in_box(
     start = _start_exe()
     if not start:
         return None
+
+    # ⚠️ 把裸 `python` 换成真实解释器路径。
+    #    沙箱里 Windows 的 App Execution Alias 转发不过去，
+    #    `python xxx.py` 会直接报"系统无法执行指定的程序"。
+    #    而这是模型最爱写的命令。
+    command = _resolve_python(command)
 
     out_real = ""
     cmd_body = command

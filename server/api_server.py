@@ -707,6 +707,37 @@ class Handler(BaseHTTPRequestHandler):
                 "remaining": max(0, int(until - _t.time())),
             }))
 
+
+        if path == "/api/net/allow":
+            # 验联网验证码 → 放行联网一段时间。
+            #
+            # ⚠️ 只接受**码**，不接受"我要联网"这种命令。
+            #    前台会调它（用户回复的码要转过来），
+            #    但前台不知道码是什么 —— 验在服务端。
+            from guard import netauth as _na
+            from guard import netpolicy as _np
+
+            code = str(body.get("code") or "").strip()
+            minutes = int(body.get("minutes") or 30)
+            if minutes < 1:
+                minutes = 1
+            if minutes > 480:
+                minutes = 480     # 最长 8 小时
+
+            ok, msg = _na.verify(code)
+            if not ok:
+                return self._send(*_json({"ok": False, "error": msg}, 400))
+
+            until = _np.grant(minutes, "用户验证码放行联网")
+            import time as _t
+
+            return self._send(*_json({
+                "ok": True,
+                "message": msg,
+                "until": until,
+                "remaining": max(0, int(until - _t.time())),
+            }))
+
         if path == "/api/auditor/status":
             # 看审核员现在什么状态。只读。
             from guard import auditor as _aud
@@ -724,6 +755,13 @@ class Handler(BaseHTTPRequestHandler):
                 "ready_why": why,
                 "remaining": _ast.remaining(),
             }))
+
+
+        if path == "/api/net/status":
+            # 看现在有没有联网授权、还剩多久。只读。
+            from guard import netpolicy as _np
+
+            return self._send(*_json(_np.status()))
 
         if path == "/api/engine/models":
             try:
