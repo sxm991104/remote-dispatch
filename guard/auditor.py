@@ -186,6 +186,18 @@ def review(changes: dict) -> dict:
         asking   正在等用户填码
         off      用户已证明身份，窗口内不审
     """
+    # ⚠️ 先看用户选的安全模式。
+    #
+    #    模式二（出事可回退）不需要审计员 ——
+    #    他选的是"别管我，出事退回去"。
+    try:
+        from guard import security_mode as _sm
+
+        if not _sm.wants("audit"):
+            return _ret("skip", ["当前模式不需要审计"])
+    except Exception:  # noqa: BLE001
+        pass
+
     cfg = load()
     ok, why = is_ready(cfg)
     if not ok:

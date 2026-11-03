@@ -23,7 +23,7 @@
       "fails": []
     },
     "D. 路径层越界（workspace 权限）": {
-      "pass": 38,
+      "pass": 63,
       "fail": 0,
       "err": 0,
       "skip": 0,
@@ -59,7 +59,7 @@
     }
   },
   "totals": {
-    "pass": 332,
+    "pass": 357,
     "fail": 0,
     "err": 0,
     "skip": 0

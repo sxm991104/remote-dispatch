@@ -698,6 +698,26 @@ class DshPushPlugin(Star):
             umo = event.unified_msg_origin
             if not umo:
                 return
+            # ⚠️ 只记**私聊**。群消息一律不记，推送绝不进群。
+            #
+            #    为什么：
+            #        原来不管私聊还是群都记，而且**后说的覆盖先说的**。
+            #        于是：先私聊派活 → 再去群里闲聊一句 →
+            #             任务做完，**推送进了群**，群里有别人。
+            #
+            #        用户要的是"只推给用户本人"，所以这里直接过滤掉群。
+            #
+            #    umo 格式：
+            #        feishu:FriendMessage:ou_xxx      ← 私聊，记
+            #        feishu:GroupMessage:oc_xxx       ← 群，跳过
+            #
+            #    ⚠️ 用 umo 判，不用 event.message_obj.type ——
+            #       umo 是 AstrBot 自己拼的，格式稳定；
+            #       那个 type 字段在不同平台/版本下不一定一致。
+            if "FriendMessage" not in umo:
+                # 群消息 / 其他会话：只当没看见，不改推送目标
+                return
+
             plat = umo.split(":", 1)[0]
             atlas = getattr(self, "_umo_by_platform", None)
             if atlas is None:

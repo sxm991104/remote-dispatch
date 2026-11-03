@@ -933,25 +933,70 @@ _PENDING_DELETES: list[str] = []
 
 
 def _sandbox_state() -> dict:
-    """沙箱当前能不能用。探测一次缓存住。"""
+    """影子执行能不能用。探测一次缓存住。
+
+    ⚠️ 两个平台两套实现，语义对齐：
+
+        Windows   Sandboxie 的延迟删除 + 影子文件
+        Linux     unshare --user --mount --net + overlayfs
+
+    实测（2026-11-03）：
+        Linux 上沙箱里改 / 删 / 建文件，真机一个字节都没动，
+        而且 curl 出不去（--net）。
+    """
     global _SANDBOX_CACHE
     if _SANDBOX_CACHE is not None:
         return _SANDBOX_CACHE
 
-    d = {"ok": False, "why": "未探测"}
-    try:
-        from guard import sandbox as _sb
+    d: dict = {"ok": False, "why": "未探测", "kind": ""}
 
-        if not _sb.available():
-            d = {"ok": False, "why": "没装 Sandboxie"}
-        elif not _sb.box_exists():
-            d = {"ok": False, "why": "沙箱还没建"}
+    # ⚠️ 先看用户选的安全模式要不要影子执行。
+    #
+    #    模式一（严格）  要
+    #    模式二（回滚）  **Windows 不要 / Linux 要**
+    #                   Windows 的回退靠系统卷影副本，跟影子无关；
+    #                   Linux 的版本历史**就是**影子层给的。
+    #    模式三（全开）  要
+    try:
+        from guard import security_mode as _sm
+
+        if not _sm.wants("shadow"):
+            _SANDBOX_CACHE = {
+                "ok": False,
+                "why": f"当前是「{_sm.MODE_LABEL.get(_sm.get(), '?')}」模式，"
+                       "这一档不用影子执行",
+                "kind": "",
+                "by_mode": True,
+            }
+            return _SANDBOX_CACHE
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        if sys.platform == "win32":
+            from guard import sandbox as _sb
+
+            if not _sb.available():
+                d = {"ok": False, "why": "没装 Sandboxie", "kind": "win"}
+            elif not _sb.box_exists():
+                d = {"ok": False, "why": "沙箱还没建", "kind": "win"}
+            else:
+                d = {"ok": True, "why": "", "kind": "win"}
         else:
-            d = {"ok": True, "why": ""}
-    except ImportError:
-        d = {"ok": False, "why": "sandbox 模块不在"}
+            from guard import sandbox_linux as _sl
+
+            if _sl.available():
+                d = {"ok": True, "why": "", "kind": "linux"}
+            else:
+                d = {
+                    "ok": False,
+                    "why": f"Linux 影子层不可用：{_sl.describe()}",
+                    "kind": "linux",
+                }
+    except ImportError as e:
+        d = {"ok": False, "why": f"沙箱模块不在：{e}", "kind": ""}
     except Exception as e:  # noqa: BLE001
-        d = {"ok": False, "why": f"{type(e).__name__}"}
+        d = {"ok": False, "why": f"{type(e).__name__}: {e}", "kind": ""}
 
     _SANDBOX_CACHE = d
     return d
@@ -1197,18 +1242,69 @@ def _net_fallback_allowed() -> tuple[bool, str]:
 
 def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
                                 timeout: int):
-    """在沙箱里跑。不可用返回 None，调用方退回普通执行。
+    """在影子里跑。不可用返回 None。
+
+    ⚠️ 两个平台两套实现，语义对齐：
+
+        Windows   Sandboxie。跑完要 snapshot 对比、apply_after_run 回写、清影子。
+        Linux     unshare + overlayfs。跑完直接看 upper 层就知道改了什么，
+                  不用快照也不用回写。
 
     ⚠️ 这里只管"跑"和"记下删除"，不管"问用户"。
         问用户是异步的（发邮件、等人回），
         而 run_command 是同步阻塞的——模型在等结果。
-        在这里卡住等验证码，整个任务就冻了，
-        而人可能根本不在电脑前。
     """
     st = _sandbox_state()
     if not st["ok"]:
         return None
 
+    kind = st.get("kind") or ""
+
+    # ── Linux：unshare + overlayfs ──
+    if kind == "linux":
+        try:
+            from guard import sandbox_linux as _sl
+        except ImportError:
+            return None
+
+        try:
+            p = _sl.run_in_box(
+                command,
+                cwd=work_dir,
+                env=env,
+                timeout=_effective_timeout(timeout),
+            )
+        except subprocess.TimeoutExpired:
+            raise
+        except Exception:  # noqa: BLE001
+            return None
+
+        if p is None:
+            return None
+
+        # 改了什么，直接从 upper 层读
+        try:
+            global _PENDING_DELETES
+            ch = _sl.classify_changes(work_dir)
+
+            # 删除先扣着，等验证码 / 审核
+            for real in ch.get("deletes") or []:
+                if real not in _PENDING_DELETES:
+                    _PENDING_DELETES.append(real)
+
+            # 写入和修改：Linux 这边**由 apply_after_run 统一回写**，
+            # 但那个函数在 run_command 里 —— 这里只把结果挂到 p 上，
+            # 让上层知道 Linux 有改动要处理。
+            try:
+                p._dsh_linux_changes = ch
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+
+        return p
+
+    # ── Windows：Sandboxie ──
     try:
         from guard import sandbox as _sb
     except ImportError:
@@ -1229,15 +1325,8 @@ def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
         )
     except subprocess.TimeoutExpired:
         # ⚠️ 超时 ≠ 沙箱不可用。
-        #
-        #    原来这里是 `except Exception: return None`，
-        #    把超时和"起不来"压成同一个 None。
-        #    调用方看到 None 就以为沙箱坏了，于是用普通方式再跑一遍。
-        #
-        #    后果：请求 3 秒超时 → 沙箱跑 5 秒 → 再跑 5 秒 ≈ 10 秒，
-        #    最后回一句"命令超时（3 秒）被中止"。说的时间不是做的时间。
-        #
-        #    超时往上传，调用方直接返回超时，不重跑。
+        #    原来这里 `except Exception: return None`，
+        #    调用方看到 None 就用普通方式再跑一遍 —— 时间翻倍。
         raise
     except Exception:  # noqa: BLE001
         return None
@@ -1246,66 +1335,143 @@ def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
         return None
 
     # 跑完了，分两件事处理：
-    #
-    #   一、写入/修改 → 立刻回写到真机
-    #       用户无感，跟没装沙箱一样。
-    #       不回写的话，用户在资源管理器里根本看不到新文件——
-    #       那等于把"写文件"这个基本功能废了。
-    #
+    #   一、写入/修改 → 立刻回写到真机（用户无感）
     #   二、删除      → 扣着，等验证码
-    #       只有这个是不可逆的，只有它需要问人。
     try:
         import time as _t
 
         _t.sleep(0.6)      # 影子落盘有一点点延迟
         res = _sb.apply_after_run(baseline=base)
         got = res.get("deletes") or []
-        # 回写完了，把已落盘的影子清掉，别让下一轮重复处理
         _sb.clean_written_shadows(baseline=base)
     except Exception:  # noqa: BLE001
         got = []
 
     if got:
-        global _PENDING_DELETES
         for g in got:
             if g not in _PENDING_DELETES:
                 _PENDING_DELETES.append(g)
 
-        # ⚠️ 关键一步：把"沙箱发现了删除"这件事交给动作守卫。
-        #
-        #    沙箱不是另一套机制，它是守卫的**另一只眼睛**：
-        #
-        #        词表   看命令行写了什么
-        #        沙箱   看文件系统真发生了什么
-        #
-        #    两只眼睛看到的东西都走同一个入口——guard_gate.intercept。
-        #    于是：
-        #
-        #        明写的删除    →  词表拦 → 计数 +1
-        #        藏起来的删除  →  沙箱拦 → 计数 +1
-        #                                  ↑ 走同一条路
-        #
-        #    三次锁死、发验证码、清计数，全都复用已有的那套，
-        #    不新造机制、不新开一条验证码通道。
         try:
-            from guard import guard_gate as _gg
+            from guard import guard_gate as _gate
 
-            shown = ", ".join(os.path.basename(x) for x in got[:3])
-            more = f" 等 {len(got)} 个" if len(got) > 3 else ""
-            _hit = _gg.intercept(
-                shown,
-                f"沙箱发现它在删工作区外的文件：{shown}{more}",
-            )
-            if _hit.get("tripped"):
-                # 到三次了，把话说明白——模型要看见自己把任务端搞锁了。
-                return (
-                    "命令跑了，但它试图删除工作区外的文件，已被影子层拦下。\n"
-                    f"{_hit.get('message')}"
-                )
+            for g in got:
+                _gate.intercept(g, f"沙箱里发现删除：{g}")
         except Exception:  # noqa: BLE001
             pass
 
     return p
+def _linux_apply_changes(work_dir: str, r):
+    """把 Linux 影子层里的改动落地。
+
+    ⚠️ 顺序很重要：
+
+        一、先分类（改了什么）
+        二、**审核**（guard/auditor.py）
+        三、审核通过才回写
+        四、清掉影子层
+
+    反过来的话文件已经落地了才问"这改得对不对" ——
+    那时候原文已经被覆盖，问也没用了。
+
+    返回 r（CompletedProcess），只可能在需要时改它的 stdout。
+    """
+    from guard import sandbox_linux as _sl
+
+    try:
+        ch = _sl.classify_changes(work_dir)
+    except Exception:  # noqa: BLE001
+        try:
+            _sl.cleanup(work_dir)
+        except Exception:  # noqa: BLE001
+            pass
+        return r
+
+    has_any = bool(ch.get("deletes") or ch.get("writes") or ch.get("modifies"))
+    if not has_any:
+        try:
+            _sl.cleanup(work_dir)
+        except Exception:  # noqa: BLE001
+            pass
+        return r
+
+    # ── 审核 ──
+    # 审核不过 → 一个字都不落
+    try:
+        from guard import auditor as _aud
+
+        audit = _aud.review(ch)
+    except Exception as e:  # noqa: BLE001
+        audit = {"verdict": "skip", "reasons": [f"审核员异常：{e}"]}
+
+    if audit and audit.get("verdict") in ("block", "asking", "locked"):
+        # 扣住。影子层先留着 —— 等用户填了码再说。
+        why = "；".join(audit.get("reasons") or [])
+        try:
+            extra = (
+                f"\n[审核] 这次改动被扣住了：{why}\n"
+                "[审核] 文件**没有**落到真机上。\n"
+            )
+            if r is not None and getattr(r, "stdout", None) is not None:
+                r.stdout = (r.stdout or b"") + extra.encode("utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+        return r
+
+    # ── 回写：新建 / 修改 ──
+    written = 0
+    failed = 0
+
+    for shadow, real in (ch.get("writes") or []) + (ch.get("modifies") or []):
+        try:
+            os.makedirs(os.path.dirname(real), exist_ok=True)
+            # ⚠️ 用 copy2 保留权限位。
+            #    shutil.copy 会按默认 umask 建文件 ——
+            #    脚本丢了执行位就跑不起来了。
+            import shutil
+
+            shutil.copy2(shadow, real)
+            written += 1
+        except (OSError, shutil.Error):
+            failed += 1
+
+    # ── 删除：扣着等验证码 ──
+    # ⚠️ 这里**不真删**。真删要用户确认（guard_gate 那套）。
+    pend = ch.get("deletes") or []
+    if pend:
+        global _PENDING_DELETES
+        for real in pend:
+            if real not in _PENDING_DELETES:
+                _PENDING_DELETES.append(real)
+
+        try:
+            from guard import guard_gate as _gate
+
+            for real in pend:
+                _gate.intercept(real, f"影子里要删：{real}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ── 清影子 ──
+    try:
+        _sl.cleanup(work_dir)
+    except Exception:  # noqa: BLE001
+        pass
+
+    if written or failed:
+        try:
+            msg = (
+                f"\n[影子] 落地 {written} 个文件"
+                + (f"，{failed} 个失败" if failed else "")
+                + (f"；{len(pend)} 个删除等着你确认" if pend else "")
+                + "\n"
+            )
+            if r is not None and getattr(r, "stdout", None) is not None:
+                r.stdout = (r.stdout or b"") + msg.encode("utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
+    return r
 
 
 def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
@@ -1361,37 +1527,36 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
     #    中文全在文件里，代码页切换在读取文件之前就生效了。
     #
     #    这是 CI 打出来的：中文 Windows（936）上一直是绿的。
-    if sys.platform == "win32":
+    # ── 两条路：有影子执行走影子，没有就走普通 ──
+    #
+    # ⚠️ 原来这里是：
+    #        if sys.platform == "win32":   沙箱
+    #        else:                         裸 subprocess.run
+    #
+    #    Linux 上一直是**裸跑**：没有影子层，也没有断网。
+    #    现在 Linux 有 unshare + overlayfs 了，两边都走影子。
+    _st = _sandbox_state()
+    _use_box = bool(_st.get("ok"))
+
+    if _use_box:
         try:
             r = _run_in_sandbox_if_possible(command, work_dir, env, timeout)
         except subprocess.TimeoutExpired:
-            # 沙箱里跑超时了 —— 不要再跑一遍。
-            #
-            # 重跑一遍的话：用户说 3 秒，实际等 10 秒，
-            # 而且第二条命令可能又改一遍文件。
+            # 影子里跑超时了 —— 不要再跑一遍。
+            # 重跑的话用户说 3 秒实际等 10 秒，而且命令可能又改一遍文件。
             return _timeout_msg(command, timeout)
+
         if r is None:
-            # None 才是"沙箱不可用"。
+            # None 才是"影子执行不可用"。
             #
             # ⚠️ 这里原来是**无条件**退回普通执行 ——
-            #    而普通执行有网（沙箱里是断网的）。
-            #
-            #    等于：沙箱一坏，命令就掉回能上网的模式，
-            #    而且没人知道。
+            #    而普通执行是联网的（影子里断网）。
             #
             #    现在分两种：
-            #        没装 Sandboxie   → 允许（正常配置）
-            #        装了但起不来     → 要么有联网授权，要么拒绝
+            #        根本没装      → 允许（正常配置）
+            #        装了但起不来  → 要么有联网授权，要么拒绝
             _can, _why = _net_fallback_allowed()
             if not _can:
-                # 自动发一个联网验证码，并通告前台。
-                #
-                # ⚠️ 为什么自动发：
-                #    用户派了活，命令被拒，他得知道"该怎么办"。
-                #    只回一句"需要授权"，他还得自己去翻设置找入口。
-                #
-                #    发码是**单向**的：码进邮箱，前台只知道"要码了"。
-                #    跟审核员那套一个路子。
                 _sent, _msg = True, ""
                 try:
                     from guard import netauth as _na
@@ -1404,7 +1569,7 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
                     f"【需要联网授权】{_why}\n"
                     f"命令：{command[:200]}\n"
                     "\n"
-                    "⚠️ 这条命令**没有执行**。沙箱起不来，"
+                    "⚠️ 这条命令**没有执行**。影子执行起不来，"
                     "而普通执行是联网的 —— 不能默认放行。\n"
                     + (
                         "验证码已发到你的邮箱。回复它，"
@@ -1414,14 +1579,37 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
                              "去「设置 → 远程验证」把邮箱配好。"
                     )
                 )
-            # ⚠️ 这里不用 _log_quiet —— 那是 core/bridge.py 里的，
-            #    在 engine/tools.py 里没定义。直接写 stderr。
             try:
-                print(f"[沙箱] 不可用，退回普通执行：{_why}", file=sys.stderr)
+                print(f"[影子] 不可用，退回普通执行：{_why}", file=sys.stderr)
             except Exception:  # noqa: BLE001
                 pass
+
+            # Linux 上退回普通执行，但沙箱准备过的影子层得清掉
+            if (_st.get("kind") or "") == "linux":
+                try:
+                    from guard import sandbox_linux as _sl
+
+                    _sl.cleanup(work_dir)
+                except Exception:  # noqa: BLE001
+                    pass
+
             r = _run_on_windows(command, work_dir, env, timeout)
+
+        # ── Linux：影子层里的改动要在这里落地 ──
+        #
+        # ⚠️ Windows 那套在 _run_in_sandbox_if_possible 里
+        #    已经调过 apply_after_run 了（回写 + 扣删除）。
+        #    Linux 的语义不一样：改动在 upper 层，得这里回写。
+        if (_st.get("kind") or "") == "linux":
+            try:
+                r = _linux_apply_changes(work_dir, r)
+            except Exception as _e:  # noqa: BLE001
+                try:
+                    print(f"[影子] Linux 回写失败：{_e}", file=sys.stderr)
+                except Exception:  # noqa: BLE001
+                    pass
     else:
+        # 没有影子执行：裸跑
         args = _build_args(command)
         try:
             r = subprocess.run(

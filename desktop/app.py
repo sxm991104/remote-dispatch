@@ -425,6 +425,7 @@ class MainWindow(
         if idx == 2:
             self._refresh_deps()
         if idx == 3:
+            self._load_security_mode()
             self._load_profiles()
             # 审核员配置也拉一下（同样很便宜）
             self._load_auditor()
@@ -461,6 +462,9 @@ class MainWindow(
 
         # 四张卡各自独立成方法——改哪张直接跳过去，
         # 不用在这个方法里翻几百行。
+        #
+        # ⚠️ 安全模式在最前面：它决定了下面那些卡还生效不生效。
+        self._card_security_mode(lay)
         self._card_model(lay)
         self._card_guard(lay)
         self._card_autostart(lay)
@@ -481,7 +485,9 @@ class MainWindow(
         self._load_profiles()
 
     def _on_api(self, path: str, data) -> None:
-        if path == "/api/auditor" and isinstance(data, dict):
+        if path == "/api/security/mode" and isinstance(data, dict):
+            self._on_security_mode(data)
+        elif path == "/api/auditor" and isinstance(data, dict):
             self._on_auditor(data)
         elif path == "/api/tasks" and isinstance(data, list):
             self.tasks = data

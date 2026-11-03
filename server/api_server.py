@@ -569,6 +569,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._task_log(rest[: -len("/log")])
             return self._task(rest)
 
+
+        if path == "/api/security/mode":
+            # 安全模式。只读。
+            #
+            # ⚠️ 改模式在 do_POST 里，这里只读 ——
+            #    GET 没有 body，走不了 set_mode。
+            from guard import security_mode as _sm
+
+            return self._send(*_json(_sm.status()))
+
+        if path == "/api/net/status":
+                # 看现在有没有联网授权、还剩多久。只读。
+                from guard import netpolicy as _np
+
+                return self._send(*_json(_np.status()))
         return self._send(404, b'{"error":"not found"}')
 
     def do_POST(self):  # noqa: N802
@@ -738,6 +753,8 @@ class Handler(BaseHTTPRequestHandler):
                 "remaining": max(0, int(until - _t.time())),
             }))
 
+
+
         if path == "/api/auditor/status":
             # 看审核员现在什么状态。只读。
             from guard import auditor as _aud
@@ -757,11 +774,13 @@ class Handler(BaseHTTPRequestHandler):
             }))
 
 
-        if path == "/api/net/status":
-            # 看现在有没有联网授权、还剩多久。只读。
-            from guard import netpolicy as _np
 
-            return self._send(*_json(_np.status()))
+
+        if path == "/api/security/mode":
+            # 安全模式。只读。
+            from guard import security_mode as _sm
+
+            return self._send(*_json(_sm.status()))
 
         if path == "/api/engine/models":
             try:

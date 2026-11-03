@@ -384,6 +384,18 @@ def main() -> int:
     print(f"  合计：{total_pass} 通过，{total_fail} 失败（{elapsed:.1f} 秒）")
     if failed_modules:
         print(f"  失败模块：{', '.join(failed_modules)}")
+
+        # ⚠️ 给 CI 用的：打 FAILED 开头的话。
+        #
+        #    workflow 里那条 grep -E '^(FAILED|tests/.*FAILED)'
+        #    需要这个前缀，才能把失败名做成 annotation。
+        #    没有这行 → CI 红了但 annotation 是空的 → 作者不知道挂在哪。
+        #
+        #    2026-11-03 实测：a59e69f 在 ubuntu 上红了，
+        #    annotation 只有一个「Process completed with exit code 1」，
+        #    完全看不出是哪个测试。
+        for _m in failed_modules:
+            print(f"FAILED: {_m}")
     print("=" * 66)
 
     # ⚠️ 退出码要同时看 total_fail 和 failed_modules。

@@ -184,6 +184,18 @@ jobs:
             grep -E '^(FAILED|tests/.*FAILED)' /tmp/reg.log 2>/dev/null | head -20 | while read -r L; do
               echo "::error::$L"
             done
+            # ⭐ 再抓一条汇总行：`失败模块：A, B, C`
+            #
+            #   上面那条 grep 抓的是 `FAILED: xxx`（run_all.py 打的），
+            #   但汇总行一眼能看到**全部**失败的模块名，更适合当 annotation。
+            #
+            #   2026-11-03：a59e69f 在 ubuntu 上红了，
+            #   annotation 只有一个 exit code 1 —— 因为当时 run_all.py
+            #   打的是「失败模块：」而不是「FAILED:」，两条 grep 都对不上。
+            #   现在两边都抓，哪条格式变了都不至于瞎。
+            grep -E '^\s*失败模块：' /tmp/reg.log 2>/dev/null | head -3 | while read -r L; do
+              echo "::error::$L"
+            done
             # 再打一条汇总，防止一条 FAILED 都没有（比如崩在收集阶段）
             if ! grep -q "^FAILED" /tmp/reg.log 2>/dev/null; then
               echo "::error::回归测试失败但没有 FAILED 行，看 summary 里的最后 200 行"

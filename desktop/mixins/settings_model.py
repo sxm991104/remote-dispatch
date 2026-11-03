@@ -54,6 +54,113 @@ from theme import (
 
 class SettingsModelMixin:
 
+    def _card_security_mode(self, lay: QVBoxLayout) -> None:
+        """设置页 · 安全模式。
+
+        ⚠️ 这一张在最前面 —— 因为它决定了别的卡还生不生效。
+
+            选了「出事可回退」，下面的验证码 / 审计员 / 守卫都不起作用，
+            界面上得让用户看得见这个事实，而不是让他在别处瞎找。
+        """
+        card = QFrame()
+        card.setObjectName("card")
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(20, 18, 20, 18)
+        cl.setSpacing(10)
+
+        h = QLabel("安全模式")
+        h.setFont(font(13, QFont.DemiBold))
+        h.setStyleSheet(f"color:{C_TEXT};")
+        cl.addWidget(h)
+
+        sub = QLabel("选一套就够。三套各有取舍 —— 没有「全都最好」的那一套。")
+        sub.setFont(font(11))
+        sub.setStyleSheet(f"color:{C_DIM2};")
+        sub.setWordWrap(True)
+        cl.addWidget(sub)
+
+        self.mode_btns = {}
+
+        for key, title, desc in (
+            ("strict", "严格防护",
+             "动手之前先拦：词表、影子执行、审计员、验证码。"
+             "改了就是改了，退不回去。"),
+            ("rollback", "出事可回退",
+             "不拦、不要码、不审。命令直接在真机上跑，"
+             "出问题靠版本回退（Windows 用系统快照，Linux 用影子层）。"),
+            ("both", "全开",
+             "又拦又回退。最安全，也最慢。"),
+        ):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+
+            b = QPushButton(title)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumWidth(110)
+            b.clicked.connect(lambda _=False, k=key: self._set_security_mode(k))
+            row.addWidget(b, 0, Qt.AlignTop)
+            self.mode_btns[key] = b
+
+            lb = QLabel(desc)
+            lb.setFont(font(10.5))
+            lb.setStyleSheet(f"color:{C_DIM};")
+            lb.setWordWrap(True)
+            row.addWidget(lb, 1)
+
+            cl.addLayout(row)
+
+        self.lbl_mode_now = QLabel("")
+        self.lbl_mode_now.setFont(font(10.5))
+        self.lbl_mode_now.setStyleSheet(f"color:{C_DIM2};")
+        self.lbl_mode_now.setWordWrap(True)
+        cl.addWidget(self.lbl_mode_now)
+
+        lay.addWidget(card)
+
+    def _load_security_mode(self) -> None:
+        """拉安全模式。"""
+        self.api.get("/api/security/mode")
+
+    def _on_security_mode(self, d) -> None:
+        if not isinstance(d, dict):
+            return
+        mode = d.get("mode") or "strict"
+
+        for k, b in getattr(self, "mode_btns", {}).items():
+            b.setChecked(k == mode)
+
+        f = d.get("features") or {}
+        on = []
+        if f.get("guard"):
+            on.append("动作守卫")
+        if f.get("shadow"):
+            on.append("影子执行")
+        if f.get("audit"):
+            on.append("审计员")
+        if f.get("code"):
+            on.append("验证码")
+        if f.get("rewind"):
+            on.append("版本回退")
+
+        self.lbl_mode_now.setText(
+            f"现在是「{d.get('label') or mode}」："
+            f"{' + '.join(on) if on else '什么都不开'}"
+        )
+
+    def _set_security_mode(self, mode: str) -> None:
+        def done(data):
+            if isinstance(data, dict) and data.get("ok"):
+                self._on_security_mode(data)
+            else:
+                self.lbl_mode_now.setText((data or {}).get("error") or "改不了")
+                self._load_security_mode()
+
+        self.api.request_once(
+            "/api/security/mode", {"mode": mode}, timeout=20, callback=done
+        )
+
+
     def _card_model(self, lay: QVBoxLayout) -> None:
         """设置页 · 任务端模型卡。原来是 _build_settings_page 里的一大段，按卡片边界切出来的。"""
         # ── 任务端模型 ──

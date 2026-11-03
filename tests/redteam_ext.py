@@ -425,6 +425,95 @@ else:
     for label, p in D_WIN:
         skip(label, "Windows 特有，Linux 上路径语义不同")
 
+# Linux 特有：不能只测 D_PORTABLE 那 14 条。
+#
+# ⚠️ 补这段之前，Linux 上 D 组只跑 14 条，其中一条软链接、一条 /etc 都没有。
+#    "通过"不代表安全，只代表**没测**。
+D_NIX = [
+    # --- 系统敏感路径 ---
+    ("写 /etc/passwd", "/etc/passwd"),
+    ("写 /etc/shadow", "/etc/shadow"),
+    ("写 /etc/hosts", "/etc/hosts"),
+    ("写 /root/x", "/root/pwned.txt"),
+    ("写 /boot/x", "/boot/pwned.txt"),
+    ("写 /usr/bin/x", "/usr/bin/pwned"),
+    # --- proc / sys（改不了，但要确认被拒而不是崩） ---
+    ("写 /proc/self/mem", "/proc/self/mem"),
+    ("写 /proc/sys/kernel/x", "/proc/sys/kernel/pwned"),
+    ("写 /sys/x", "/sys/pwned"),
+    # --- HOME 逃逸 ---
+    ("写 ~/.ssh/authorized_keys", "~/.ssh/authorized_keys"),
+    ("写 ~/.bashrc", "~/.bashrc"),
+    ("写 ~/.profile", "~/.profile"),
+    ("写 ~/.config/x", "~/.config/pwned"),
+    # --- 特殊路径 ---
+    ("写 /dev/ 之下", "/dev/pwned"),
+    ("写 /tmp 绝对路径", "/tmp/pwned_by_redteam.txt"),
+    # --- 深度相对路径 ---
+    ("40 级 ..", "/".join([".."] * 40) + "/pwned.txt"),
+    ("点斜混用深", "./././../../../../../../pwned.txt"),
+    ("双斜杠绝对", "//etc/passwd"),
+    ("三斜杠绝对", "///etc/passwd"),
+    ("尾部 NUL", "/etc/passwd\x00.txt"),
+]
+for label, p in D_NIX:
+    ok(label, write_blocked(p), p[:60])
+
+# --- 软链接逃逸 ---
+#
+# ⚠️ 这是 Linux 最容易漏的一条：
+#    路径本身在 workspace 里（"escape_link/pwned.txt"），
+#    但顺着链接走出去就是外面。
+#    只做字符串前缀判断的守卫会放行。
+print("  --- 软链接逃逸 ---")
+try:
+    link = os.path.join(WORKDIR, "escape_link")
+    if os.path.islink(link):
+        os.unlink(link)
+    elif os.path.exists(link):
+        import shutil as _sh
+
+        _sh.rmtree(link, ignore_errors=True)
+    os.symlink(OUTSIDE, link)
+    ok("软链接目录 → 外面", write_blocked("escape_link/pwned.txt"),
+       "escape_link/pwned.txt")
+    ok_true(
+        "软链接写不生效",
+        not os.path.exists(os.path.join(OUTSIDE, "pwned.txt")),
+    )
+except OSError as e:
+    skip("软链接目录 → 外面", f"建不了软链接：{e}")
+except Exception as e:
+    err("软链接逃逸", e)
+
+try:
+    flink = os.path.join(WORKDIR, "escape_file")
+    if os.path.islink(flink):
+        os.unlink(flink)
+    elif os.path.exists(flink):
+        os.unlink(flink)
+    os.symlink(SECRET, flink)
+    ok("软链接文件 → 外面", write_blocked("escape_file"), "escape_file")
+except OSError as e:
+    skip("软链接文件 → 外面", f"建不了软链接：{e}")
+except Exception as e:
+    err("软链接文件逃逸", e)
+
+# --- 底层工具也要测 ---
+print("  --- 底层工具（Linux） ---")
+for label, p in (
+    ("tools.write_file 写 /etc/passwd", "/etc/passwd"),
+    ("tools.write_file 写 ~/.bashrc", os.path.expanduser("~/.bashrc")),
+):
+    try:
+        tools.write_file(p, "HACKED")
+        ok_true(label, False, "居然写成功了")
+    except PermissionError:
+        ok_true(label, True)
+    except Exception as e:
+        ok_true(label, True, type(e).__name__)
+
+
 # 底层工具直接调（绕过 agent 守卫，验证 _resolve + task_perms 本身）
 print("  --- 直接调底层工具 ---")
 try:

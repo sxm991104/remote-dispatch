@@ -74,6 +74,28 @@ def intercept(task: str, reason: str = "") -> dict:
             "message": 给用户看的话
         }
     """
+    # ⚠️ 先看用户选的安全模式。
+    #
+    #    模式一（严格）/ 模式三（全开）  → 照常拦
+    #    模式二（出事可回退）           → **不拦**
+    #
+    #    模式二的用户选的是「我让它跑，出事我自己退回去」。
+    #    那是他的权利 —— 我们不再假装比他更懂他要什么。
+    #    但要记住：这一档**没有拦截**，只有版本回退。
+    try:
+        from guard import security_mode as _sm
+    
+        if not _sm.wants("guard"):
+            return {
+                "count": 0,
+                "tripped": False,
+                "skipped": True,
+                "message": "",
+            }
+    except Exception:  # noqa: BLE001
+        # 模式读不出来 → 按严格处理（宁可多拦一次）
+        pass
+
     store = _store()
 
     if store is None:
@@ -337,6 +359,27 @@ def gate(task: str) -> dict:
         二、任务看着不安全 → 记一次拦截，不许过，告诉他第几次了
         三、其他 → 放行
     """
+    # ⚠️ 先看用户选的安全模式。
+    #
+    #    模式一（严格）/ 模式三（全开）  → 该挡就挡，该要码就要码
+    #    模式二（出事可回退）           → **不挡、不要码**
+    #
+    #    模式二的用户选的是「别管我，出事我自己退回去」。
+    #    给他挡着、要他填码，是违背他自己的选择。
+    try:
+        from guard import security_mode as _sm
+    
+        if not _sm.wants("code"):
+            return {
+                "allow": True,
+                "reason": "",
+                "count": 0,
+                "by_mode": True,
+            }
+    except Exception:  # noqa: BLE001
+        # 模式读不出来 → 按严格处理
+        pass
+
     # 一、先看有没有正在生效的围栏
     g = _guard()
     st = g.check(task)
