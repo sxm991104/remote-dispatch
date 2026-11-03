@@ -97,43 +97,108 @@ def _is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
-def available() -> bool:
-    """这套能不能用。
+# 探测结果缓存。
+#
+# ⚠️ 为什么要缓存：真的跑一次 unshare 要 50ms 左右。
+#    而 available() 会被每个任务目录调一次 ——
+#    不缓存的话，跑一百条命令就多五秒。
+_probe_cache: dict | None = None
 
-    ⚠️ 逐个检查，而不是"猜"。
-        少一样就明确说少哪样，比返回一个 False 有用得多。
+
+def available() -> bool:
+    """这套**真的**能用吗。
+
+    ⚠️ "装没装"和"能不能用"是两件事。
+
+        GitHub Actions 的 Ubuntu 容器里：
+            unshare 命令    在 ✅
+            overlay 内核    支持 ✅
+            但 --user 一跑就失败 ❌
+                unshare: write failed /proc/self/uid_map:
+                Operation not permitted
+
+        原来的 available() 只看前两条，返回 True。
+        然后 run_in_box 里 unshare 跑挂，命令没执行，
+        调用方拿到的是 unshare 的报错 ——
+        12 条测试因为这个挂掉（2026-11-03 CI）。
+
+    所以这里真的跑一次最小 unshare 试试。
+    结果缓存住（见 _probe_cache）。
     """
+    st = _probe()
+    return bool(st.get("ok"))
+
+
+def _probe() -> dict:
+    """跑一次最小 unshare，看能不能用。缓存住。"""
+    global _probe_cache
+    if _probe_cache is not None:
+        return _probe_cache
+
+    d: dict = {"ok": False, "why": ""}
+
     if not _is_linux():
-        return False
+        d["why"] = "不是 Linux"
+        _probe_cache = d
+        return d
 
     if not shutil.which("unshare"):
-        return False
+        d["why"] = "缺 unshare（装 util-linux）"
+        _probe_cache = d
+        return d
 
-    # overlayfs 支不支持
     try:
         with open("/proc/filesystems", encoding="utf-8") as f:
             if "overlay" not in f.read():
-                return False
-    except OSError:
-        return False
+                d["why"] = "内核不支持 overlayfs"
+                _probe_cache = d
+                return d
+    except OSError as e:
+        d["why"] = f"读不到 /proc/filesystems：{e}"
+        _probe_cache = d
+        return d
 
-    return True
+    # ⚠️ 关键这一步：真的跑一次。
+    #
+    #    只跑 --user --map-root-user，不挂 overlay，不开 --net ——
+    #    这样探测本身够轻（几十毫秒），又能验证最核心的那一步。
+    try:
+        r = subprocess.run(
+            ["unshare", "--user", "--map-root-user", "--mount", "--", "true"],
+            capture_output=True,
+            timeout=10,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or b"").decode("utf-8", "replace").strip()
+            d["why"] = f"unshare 跑不起来：{err[:200] or '退出码 ' + str(r.returncode)}"
+            _probe_cache = d
+            return d
+    except (subprocess.TimeoutExpired, OSError) as e:
+        d["why"] = f"unshare 探测失败：{type(e).__name__}"
+        _probe_cache = d
+        return d
+
+    d["ok"] = True
+    _probe_cache = d
+    return d
+
+
+def reset_probe() -> None:
+    """清掉探测缓存。测试里用。"""
+    global _probe_cache
+    _probe_cache = None
+
 
 
 def describe() -> str:
     """一句话说清楚这套的状态。给界面用。"""
     if not _is_linux():
         return "不是 Linux，用不了这套"
-    if not shutil.which("unshare"):
-        return "缺 unshare（装 util-linux）"
-    try:
-        with open("/proc/filesystems", encoding="utf-8") as f:
-            if "overlay" not in f.read():
-                return "内核不支持 overlayfs"
-    except OSError:
-        return "读不到 /proc/filesystems"
-    return "可用（unshare + overlayfs，内核级）"
 
+    st = _probe()
+    if st.get("ok"):
+        return "可用（unshare + overlayfs，内核级）"
+    return st.get("why") or "不可用"
 
 # ══════════════════════════════════════════════════════
 # 影子目录

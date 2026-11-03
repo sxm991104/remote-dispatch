@@ -80,6 +80,28 @@ jobs:
         run: |
           python -m pip install PySide6
 
+
+      # ⚠️ Linux 上还要装系统库。
+      #
+      #    2026-11-03 CI 实测：
+      #        PySide6 装上了，但 import 就炸 ——
+      #        ImportError: libEGL.so.1: cannot open shared object file
+      #
+      #    GitHub 的 ubuntu runner 是精简版，没有 GUI 运行时库。
+      #    Qt 的 QApplication 一 import 就要 libEGL，没有就挂，
+      #    5 条桌面端测试全 ERROR（连窗口都没建出来）。
+      #
+      #    Windows runner 自带这些，所以只在 Linux 上装。
+      - name: 装 Qt 的系统库（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+            libfontconfig1 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+
       # 无显示器环境下 Qt 要用 offscreen 平台。
       # 测试文件里也设了默认值，这里再设一次是保险。
       - name: 设 Qt 无头模式
@@ -194,6 +216,21 @@ jobs:
             #   打的是「失败模块：」而不是「FAILED:」，两条 grep 都对不上。
             #   现在两边都抓，哪条格式变了都不至于瞎。
             grep -E '^\s*失败模块：' /tmp/reg.log 2>/dev/null | head -3 | while read -r L; do
+              echo "::error::$L"
+            done
+            # ⭐ 抓断言详情 —— 只说'哪个模块挂了'不够，要知道**为什么**挂。
+            #
+            #   run_all.py 失败时会打：
+            #       ---- 引擎核心 失败详情 ----
+            #       ...pytest 的 traceback（最后 40 行）...
+            #
+            #   这里把里面最关键的几行挑出来：
+            #       E   AssertionError: ...   ← pytest 的断言说明
+            #       E   assert ...            ← 实际值 vs 期望值
+            #       tests/xxx.py:NNN: in ...  ← 哪条测试
+            #
+            #   不抓全部（annotation 太多会刷屏），只抓前 20 条。
+            grep -E '^\s+(E\s+(AssertionError|assert)|Failed:|[A-Za-z]*Error:)’ /tmp/reg.log 2>/dev/null | head -20 | while read -r L; do
               echo "::error::$L"
             done
             # 再打一条汇总，防止一条 FAILED 都没有（比如崩在收集阶段）
