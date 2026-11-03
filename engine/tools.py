@@ -1609,21 +1609,47 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
                 except Exception:  # noqa: BLE001
                     pass
     else:
-        # 没有影子执行：裸跑
-        args = _build_args(command)
-        try:
-            r = subprocess.run(
-                args,
-                cwd=work_dir,
-                env=env,
-                capture_output=True,
-                timeout=_effective_timeout(timeout),
-                creationflags=_nowindow_flags(),
-            )
-        except subprocess.TimeoutExpired:
-            return f"命令超时（{timeout} 秒）被中止：{command}"
-        except OSError as e:
-            return f"起不来：{e}"
+        # 没有影子执行：直接跑。
+        #
+        # ⚠️ Windows 上**必须**走 _run_on_windows，不能 _build_args + subprocess.run。
+        #
+        #    2026-11-03 CI 实测（windows-latest 两个版本都红）：
+        #        echo 中文测试  →  输出 '??????'
+        #
+        #    原因：
+        #        _build_args 返回的是 ["cmd", "/c", "echo 中文测试"]，
+        #        中文在**命令行参数**里。
+        #        cmd.exe 拿到命令行后先按当前代码页（runner 是 cp437/cp1252）
+        #        把中文转成 ANSI —— 那一步中文就变成 ? 了，
+        #        后面怎么解码都救不回来。
+        #
+        #    _run_on_windows 的做法不一样：
+        #        命令写成 UTF-8 的 .bat 文件，
+        #        命令行只传 ASCII（"chcp 65001 >nul & call 文件.bat"），
+        #        中文全在文件里，chcp 在读取文件之前就生效了。
+        #
+        #    ⚠️ 这条路径以前走不到，因为 _sandbox_state() 总是 True
+        #       （本机装了 Sandboxie 时）。这版加了安全模式判断 +
+        #       available() 真探测之后，CI 上会经常落到这里 ——
+        #       于是这个一直存在的编码 bug 暴露出来了。
+        if sys.platform == "win32":
+            r = _run_on_windows(command, work_dir, env, timeout)
+        else:
+            args = _build_args(command)
+            try:
+                r = subprocess.run(
+                    args,
+                    cwd=work_dir,
+                    env=env,
+                    capture_output=True,
+                    timeout=_effective_timeout(timeout),
+                    creationflags=_nowindow_flags(),
+                )
+            except subprocess.TimeoutExpired:
+                return f"命令超时（{timeout} 秒）被中止：{command}"
+            except OSError as e:
+                return f"起不来：{e}"
+
 
     if r is None:
         return _timeout_msg(command, timeout)
