@@ -31,6 +31,30 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# 项目自己的临时目录。不走系统的 Temp ——
+# 那个目录的权限在有些机器上会坏，见下面 --basetemp 的说明。
+_LOCAL_TMP = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_tmp"
+)
+
+# ⚠️ 先建出父目录。
+#    pytest 的 --basetemp 只会建最后一级，
+#    父目录不存在会直接 FileNotFoundError。
+try:
+    os.makedirs(_LOCAL_TMP, exist_ok=True)
+except OSError:
+    pass
+
+# pytest 的 basetemp，指到项目自己的 _tmp 下。
+#
+# 为什么不让它用默认的 %LOCALAPPDATA%\Temp\pytest-of-<user>：
+#     那个目录在有些机器上权限会坏（连 icacls 都读不了），
+#     结果 tmp_path 建不了、收尾清理抛 PermissionError，
+#     测试本身全过但整个模块被判失败。
+#
+# 实测（2026-11-04）：12 个模块全红，全是这一个原因。
+_BASE_TMP = os.path.join(_LOCAL_TMP, "pytest-base")
+
 ROOT = os.path.dirname(HERE)
 
 # ⚠️ 中文 Windows 的控制台默认是 GBK。
@@ -153,7 +177,7 @@ def main() -> int:
 
         r = subprocess.run(
             [sys.executable, "-m", "pytest", full, "-v", "--tb=short",
-             "-p", "no:cacheprovider"],
+             "-p", "no:cacheprovider", "--basetemp", _BASE_TMP],
             cwd=ROOT,
             capture_output=True,
             text=True,

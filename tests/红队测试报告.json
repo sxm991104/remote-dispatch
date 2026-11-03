@@ -23,10 +23,10 @@
       "fails": []
     },
     "D. 路径层越界（workspace 权限）": {
-      "pass": 63,
+      "pass": 60,
       "fail": 0,
       "err": 0,
-      "skip": 0,
+      "skip": 2,
       "fails": []
     },
     "E. safe_name 任务名注入": {
@@ -59,9 +59,9 @@
     }
   },
   "totals": {
-    "pass": 357,
+    "pass": 354,
     "fail": 0,
     "err": 0,
-    "skip": 0
+    "skip": 2
   }
 }

@@ -1,4 +1,4 @@
-# Python
+ï»¿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -38,11 +38,12 @@ desktop.ini
 .env.*
 local.*.yml
 
-# ÔËÐÐÈÕÖ¾
+# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾
 bridge.log
 *.log
 
-# ÔËÐÐÊ±Êý¾Ý£¨²»Ìá½»£©
+# ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½á½»ï¿½ï¿½
 state/
 *.lock
 workspaces/
+_tmp/

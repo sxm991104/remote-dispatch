@@ -24,6 +24,42 @@ from dataclasses import dataclass, field
 from engine.ratelimit import RateLimiter
 
 
+def _clean_surrogates(obj):
+    """清掉字符串里的孤立代理对。
+
+    ## 为什么需要
+
+        实测（2026-11-04）：扣子通过 ACP 发来的用户消息里带
+        \\udc80 这种孤立代理对（就是 UTF-8 被当成 UTF-16 读过一遍的产物）。
+
+        这些字符能进 Python 的 str，但写不出去 ——
+        编码成 UTF-8 时抛：
+            UnicodeEncodeError: surrogates not allowed
+
+        而它出现在**模型请求体**里，于是整个请求发不出去。
+
+    ## 做法
+
+        递归遍历，把字符串里所有代理对字符替换掉。
+        ensure_ascii=False 加 errors 参数不管用（json.dumps 不接受），
+        所以只能自己洗。
+
+    ## 为什么不直接报错拒绝
+
+        用户根本不知道自己的输入里有坏字符 ——
+        这是传输层的产物，不是他的错。
+        **能洗就洗，洗完继续干活。**
+    """
+    if isinstance(obj, str):
+        # 代理对区间 U+D800–U+DFFF
+        return obj.encode("utf-8", "replace").decode("utf-8", "replace")
+    if isinstance(obj, list):
+        return [_clean_surrogates(x) for x in obj]
+    if isinstance(obj, dict):
+        return {_clean_surrogates(k): _clean_surrogates(v) for k, v in obj.items()}
+    return obj
+
+
 class LLMError(Exception):
     """模型调用失败。分清楚是哪一类，后面才好提示用户。"""
 
@@ -108,7 +144,10 @@ class LLM:
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
-            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            # ⚠️ 洗一遍再序列化 —— 见 _clean_surrogates 的说明。
+            #    不洗的话，用户消息里一个坏字符就能让整个请求发不出去。
+            return json.dumps(_clean_surrogates(payload),
+                              ensure_ascii=False).encode("utf-8")
 
         def make_req(body: bytes) -> urllib.request.Request:
             return urllib.request.Request(
