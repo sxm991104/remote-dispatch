@@ -47,3 +47,5 @@ state/
 *.lock
 workspaces/
 _tmp/
+# 临时会话 / pytest 临时目录
+.session.json
