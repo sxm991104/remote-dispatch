@@ -230,7 +230,7 @@ jobs:
             #       tests/xxx.py:NNN: in ...  ← 哪条测试
             #
             #   不抓全部（annotation 太多会刷屏），只抓前 20 条。
-            grep -E '^\s+(E\s+(AssertionError|assert)|Failed:|[A-Za-z]*Error:)’ /tmp/reg.log 2>/dev/null | head -20 | while read -r L; do
+            grep -E '^\s+(E\s+(AssertionError|assert)|Failed:|[A-Za-z]*Error:)' /tmp/reg.log 2>/dev/null | head -20 | while read -r L; do
               echo "::error::$L"
             done
             # 再打一条汇总，防止一条 FAILED 都没有（比如崩在收集阶段）

@@ -103,6 +103,37 @@ def main() -> int:
         ("桌面端启动", "tests/test_desktop_boots.py"),
     ]
 
+    # ── workflow 的 bash 片段语法 ──
+    #
+    # ⚠️ 2026-11-03：我在 tests.yml 里插了一段 grep，
+    #    里面混进一个**弯引号** ’（从中文排版带进来的）。
+    #
+    #    bash 解析时引号不配对 → 整个 run 块语法错 → exit code 2
+    #    → **四个平台全炸，一条测试都没跑**。
+    #
+    #    而本地跑 run_all 全是绿的 —— 因为改的是 workflow，不是代码。
+    #    这种错不该靠人眼盯，bash -n 一秒钟就能查出来。
+    print(f"\n{'─' * 66}")
+    print("  workflow 语法")
+    print(f"{'─' * 66}")
+    try:
+        import subprocess as _sp
+
+        _r = _sp.run(
+            [sys.executable, os.path.join(ROOT, "tools", "check_workflow.py")],
+            cwd=ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        for _ln in (_r.stdout or "").splitlines():
+            print(f"  {_ln.strip()}")
+        if _r.returncode != 0:
+            total_fail += 1
+            failed_modules.append("workflow 语法")
+        else:
+            print("    ✅ 全过")
+    except Exception as _e:  # noqa: BLE001
+        print(f"  ⚠️ 检查器跑不起来：{_e}")
+
     total_pass = 0
     total_fail = 0
     failed_modules = []
