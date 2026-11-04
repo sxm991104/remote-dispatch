@@ -1,10 +1,16 @@
-"""极简服务守护：只在被叫的时候才醒。
+"""服务守护 —— 只在被叫的时候才醒。
 
 为什么需要它
-    AstrBot 挂了要有人拉。但"要有人拉"这件事本身有个圈：
-    如果拉它的人也在 AstrBot 里，那 AstrBot 一死，拉它的人也死了。
+    服务挂了要有人拉。但"要有人拉"这件事本身有个圈：
+    如果拉它的人也在服务里，那服务一死，拉它的人也死了。
 
-    所以得有一个**不在 AstrBot 进程树下面**的独立东西盯着。
+    所以得有一个**不在被守护进程树下面**的独立东西盯着。
+
+它现在守护谁
+    **atrium** —— 那个接聊天平台、当前台的门。
+
+    以前的版本守护的是 AstrBot，那套已经废弃了（前台搬去了 atrium）。
+    守护逻辑本身没变，只是换了个目标。
 
 为什么不是计划任务轮询
     计划任务是"每 N 分钟查一次"——没病也去敲门，纯浪费。
@@ -13,30 +19,48 @@
     这里用 Windows 的目录变更通知（ReadDirectoryChangesW）：
     内核在文件变化时把事件推过来，**没有事件时这个进程一个 CPU 周期都不占**。
 
-它监听什么
-    <桥目录>\\restart.request
+    另外有一个低频轮询兜底（默认 30 秒看一次心跳），
+    因为"它自己崩了"这件事没人会写请求文件。
 
-    其他程序（比如桥、任务端）要重启 AstrBot 时，只做一件事：
+它监听什么
+    <桥目录>/restart.request
+
+    其他程序（比如桌面端、任务端）要重启服务时，只做一件事：
     往这个文件里写一行。剩下的交给这里。
 
 它做什么
     1. 看到 restart.request 出现/变化
     2. 读里面的内容（记下是谁请求的、什么理由）
-    3. 杀掉 AstrBot 整棵进程树
-    4. 重新拉起（start_astrbot.bat）
-    5. 等端口起来，确认成功
+    3. 杀掉服务整棵进程树
+    4. 重新拉起
+    5. 等心跳恢复，确认成功
     6. 把结果写到 restart.result，删掉请求文件
+
+怎么判断"活着"
+    atrium 每 10 秒写一次 ~/.atrium/alive.json（见 atrium/core/beat.py）。
+
+    这里读那个文件：
+        超过 60 秒没更新 → 判定挂了
+
+    为什么不查端口：atrium 不监听端口（它主动连平台出去），
+    没有端口可以查。
 
 防护（这些不是可选项）
     · **冷却期**：一次重启后 5 分钟内不再重启第二次。
-      今天已经因为重启太多次被 QQ 踢过一次，这个必须挡住。
+      以前因为重启太频繁被平台风控过，这个必须挡住。
     · **连续失败上限**：连续失败 3 次就停手，写个 .stuck 文件，
       不再自动重试。免得把机器搞成"起了就崩、崩了再起"的死循环。
-    · **不碰 NapCat**：NapCat 自己会重连，重启它反而容易触发风控。
+    · **不乱杀**：只杀命令行里带 "atrium.cli" 的 python 进程。
+      用户可能还开着别的 Python 程序，那些不能碰。
 
 用法
-    pythonw watchdog.py            ← 无窗口跑（推荐）
-    python watchdog.py             ← 带控制台，调试时用
+    pythonw tools/watchdog.py            ← 无窗口跑（推荐）
+    python tools/watchdog.py             ← 带控制台，调试时用
+
+配置（环境变量）
+    DSH_WATCHDOG_CMD         要跑的命令（默认 <当前python> -m atrium.cli run）
+    DSH_WATCHDOG_CWD         在哪个目录跑
+    DSH_WATCHDOG_DEAD_AFTER  心跳多久没更新算挂（默认 60 秒）
 """
 
 from __future__ import annotations
@@ -45,8 +69,8 @@ import ctypes
 import json
 import os
 import subprocess
-import threading
 import sys
+import threading
 import time
 import traceback
 from ctypes import wintypes
@@ -56,253 +80,368 @@ from datetime import datetime
 # 配置
 # ----------------------------------------------------------------------
 
-BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+BRIDGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+#: 请求重启：别的程序往这里写一行
 REQUEST = os.path.join(BRIDGE_DIR, "restart.request")
+
+#: 重启结果：这里读
 RESULT = os.path.join(BRIDGE_DIR, "restart.result")
+
+#: 连续失败标志
 STUCK = os.path.join(BRIDGE_DIR, "restart.stuck")
 
-# AstrBot 的启动脚本。可用环境变量覆盖，不写死路径。
-START_BAT = os.environ.get("DSH_WATCHDOG_START_BAT") or os.path.join(
-    BRIDGE_DIR, "start_astrbot.bat"
-)
+# ── 被守护的东西 ──
 
-# AstrBot 的 WebUI 端口。起来没起来，就看这个端口通不通。
-PORT = int(os.environ.get("DSH_WATCHDOG_PORT") or "6185")
+# 默认用当前解释器跑 atrium。
+# ⚠️ 用 sys.executable 而不是写死路径 ——
+#    用户在哪个 Python 里装了依赖，就用哪个跑。
+_SELF = os.path.realpath(sys.executable)
+WATCH_CMD = (os.environ.get("DSH_WATCHDOG_CMD")
+             or f'"{_SELF}" -m atrium.cli run')
 
-# 直接起 AstrBot 用的可执行文件——bat 那条路坏了的兜底。
-# 为什么要有这个：全指着 bat 的话，bat 一改坏、一删，
-# 守护就废了，而且是在最需要它的时候。
-ASTRBOT_EXE = os.environ.get("DSH_WATCHDOG_EXE") or os.path.join(
-    os.path.expanduser("~"), ".local", "bin", "astrbot.exe"
-)
-# 起 exe 时的工作目录
-ASTRBOT_CWD = os.environ.get("DSH_WATCHDOG_CWD") or ""
+# ⚠️ atrium 的代码在哪。
+#
+#    看门狗通常跟 remote-dispatch 放在一起，
+#    而 atrium 是另一个仓库 —— 从这儿跑不起来（找不到模块）。
+#
+#    所以起进程时要带上 PYTHONPATH。
+#
+#    默认取 DSH_ATRIUM_DIR，或者跟 remote-dispatch 平级的 ../atrium。
+_ATRIUM_DIR = (os.environ.get("DSH_ATRIUM_DIR")
+               or os.path.join(os.path.dirname(BRIDGE_DIR), "atrium"))
 
-# 冷却期：两次重启之间至少隔这么久（秒）
-COOLDOWN = 300
-# 端口等多久算"起来了"
-READY_TIMEOUT = 120
-# 连续失败几次就停手
-MAX_CONSECUTIVE_FAIL = 3
-# 请求文件多久没处理就算过期（避免积压的旧请求突然触发）
-REQUEST_STALE = 600
+WATCH_CWD = os.environ.get("DSH_WATCHDOG_CWD") or ""
 
-# 主动体检：每隔多久查一次"服务还活着吗"（秒）
-# 这条和"有人请求重启"是两条独立的线——
-# 没有人请求、AstrBot 自己崩了，也要能发现。
-PROBE_SECONDS = int(os.environ.get("DSH_WATCHDOG_PROBE") or "30")
-# 连续几次查不到才判定挂了（防止偶发抖动、也防止正在启动时误判）
-PROBE_MISS_LIMIT = 3
+# ── 判活的阈值 ──
+
+#: 心跳多久没更新算挂
+DEAD_AFTER = float(os.environ.get("DSH_WATCHDOG_DEAD_AFTER") or 60)
+
+#: 多久自己看一次心跳
+CHECK_EVERY = float(os.environ.get("DSH_WATCHDOG_PROBE") or 30)
+
+#: 起来时等多久算成功
+READY_TIMEOUT = 120.0
+
+# ── 防护 ──
+
+#: 一次重启后多久内不再重启（秒）
+COOLDOWN = 300.0
+
+#: 连续失败几次就停手
+MAX_FAILS = 3
 
 
 def _log(msg: str) -> None:
-    """写日志。用文件而不是 stdout —— pythonw 下没有控制台。"""
-    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
+    """写一行日志。
+
+    ⚠️ 用 append + flush，不用 logging。
+       这东西可能跑在 pythonw 下，没有控制台，
+       日志文件是唯一能看到它干了什么的地方。
+    """
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
     try:
-        with open(os.path.join(BRIDGE_DIR, "watchdog.log"), "a", encoding="utf-8") as f:
+        with open(os.path.join(BRIDGE_DIR, "watchdog.log"), "a",
+                  encoding="utf-8") as f:
             f.write(line + "\n")
     except OSError:
         pass
-
-
-# ----------------------------------------------------------------------
-# 端口检查
-# ----------------------------------------------------------------------
-
-
-def _port_open(port: int = PORT) -> bool:
-    import socket
-
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=2):
-            return True
-    except OSError:
-        return False
-
-
-def _kill_astrbot_tree() -> bool:
-    """杀掉监听 6185 的那个进程及其整棵树。返回是否真的杀了。"""
-    try:
-        out = subprocess.run(
-            ["netstat", "-ano", "-p", "tcp"],
-            capture_output=True, encoding="utf-8", errors="replace", timeout=15,
-        ).stdout
-    except Exception:  # noqa: BLE001
-        return False
-
-    pid = ""
-    for line in out.splitlines():
-        if f":{PORT}" in line and "LISTENING" in line:
-            pid = line.split()[-1]
-            break
-    if not pid:
-        return False
-
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", pid],
-            capture_output=True, timeout=20, shell=False,
-        )
+        print(line, flush=True)
     except Exception:  # noqa: BLE001
         pass
-    time.sleep(3)
-    return not _port_open()
 
 
-def _start_astrbot() -> bool:
-    """拉起 AstrBot。两条路：先走 bat，不行就直接起 exe。
+# ----------------------------------------------------------------------
+# 判活
+# ----------------------------------------------------------------------
 
-    ⚠️ 为什么要双保险（这条是别人提醒的，提醒得对）：
-        原来只指着 start_astrbot.bat。**那个 bat 一旦被改坏、被删、
-        或者里面路径变了，整个守护就废了**——而且是在最需要它的时候。
-        所以留一条不依赖 bat 的路：直接调 astrbot.exe。
+def _alive_path() -> str:
+    """atrium 的心跳文件在哪。"""
+    return os.path.join(os.path.expanduser("~"), ".atrium", "alive.json")
 
-    两个都尽量用"独立窗口"的方式起，不要挂在守护进程下面：
-    守护进程自己重启时不能把 AstrBot 一起带走。
-    """
-    # 路线一：bat（正常情况走这条，因为它可能有环境变量设置）
-    if os.path.exists(START_BAT):
-        try:
-            subprocess.Popen(
-                ["cmd", "/c", "start", "", START_BAT],
-                cwd=os.path.dirname(START_BAT),
-                shell=False,
-                close_fds=True,
-            )
-            _log(f"用 bat 拉起: {START_BAT}")
+
+def _heartbeat_age():
+    """心跳多久没更新了。None 表示没有心跳文件。"""
+    try:
+        with open(_alive_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return max(0.0, time.time() - float(d.get("ts") or 0))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _is_alive() -> bool:
+    """它活着吗。"""
+    age = _heartbeat_age()
+    return age is not None and age <= DEAD_AFTER
+
+
+def _wait_alive(timeout: float = READY_TIMEOUT) -> bool:
+    """等它活过来。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if _is_alive():
             return True
-        except Exception as e:  # noqa: BLE001
-            _log(f"bat 拉起失败（{e}），改用 exe 直接起")
-
-    # 路线二：直接起 astrbot.exe —— 不依赖那个 bat
-    exe = ASTRBOT_EXE
-    if exe and os.path.exists(exe):
-        try:
-            subprocess.Popen(
-                [exe, "run"],
-                cwd=ASTRBOT_CWD or None,
-                shell=False,
-                close_fds=True,
-            )
-            _log(f"用 exe 拉起: {exe} run")
-            return True
-        except Exception as e:  # noqa: BLE001
-            _log(f"exe 拉起也失败: {e}")
-
-    _log("两条路都不通：bat 不可用，exe 也起不来")
-    return False
-
-
-def _wait_ready() -> bool:
-    deadline = time.time() + READY_TIMEOUT
-    while time.time() < deadline:
-        if _port_open():
-            return True
-        time.sleep(2)
+        time.sleep(1.0)
     return False
 
 
 # ----------------------------------------------------------------------
-# 处理一次重启
+# 杀掉 / 拉起
+# ----------------------------------------------------------------------
+
+def _kill_tree() -> bool:
+    """杀掉被守护进程的整棵进程树。
+
+    ⚠️ 只杀命令行里带 "atrium.cli" 的 python 进程。
+       不能乱杀 —— 用户可能还开着别的 Python 程序。
+    """
+    try:
+        ps = (
+            'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | '
+            'Where-Object { $_.Name -match "^python" -and '
+            '$_.CommandLine -match "atrium.cli" } | '
+            'ForEach-Object { $_.ProcessId }'
+        )
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+        )
+        pids = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+    except Exception as e:  # noqa: BLE001
+        _log(f"查进程失败：{type(e).__name__}: {e}")
+        return False
+
+    if not pids:
+        _log("没有找到在跑的 atrium 进程")
+        return True
+
+    for pid in pids:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", pid],
+                capture_output=True, timeout=20,
+            )
+            _log(f"杀掉了 pid={pid}")
+        except Exception as e:  # noqa: BLE001
+            _log(f"杀 pid={pid} 失败：{e}")
+
+    # 等它们真死
+    time.sleep(2.0)
+    return not _is_alive()
+
+
+def _start() -> bool:
+    """拉起它。
+
+    ⚠️ 用 CreateNoWindow，不弹黑框。
+       用户可能双击看门狗来的，不该看见一堆窗口。
+    """
+    if not WATCH_CMD.strip():
+        _log("没配 DSH_WATCHDOG_CMD，不知道拉起什么")
+        return False
+
+    # ⚠️ 带上 PYTHONPATH，让它能在别处找到 atrium。
+    #
+    #    不加的话：看门狗在 remote-dispatch 目录下起
+    #    `python -m atrium.cli run`，直接 ModuleNotFoundError。
+    env = dict(os.environ)
+    if _ATRIUM_DIR and os.path.isdir(_ATRIUM_DIR):
+        old = env.get("PYTHONPATH") or ""
+        parts = [p for p in old.split(os.pathsep) if p]
+        if _ATRIUM_DIR not in parts:
+            parts.insert(0, _ATRIUM_DIR)
+        env["PYTHONPATH"] = os.pathsep.join(parts)
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
+
+    try:
+        flags = 0
+        if sys.platform == "win32":
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+
+        subprocess.Popen(
+            WATCH_CMD,
+            shell=True,
+            cwd=WATCH_CWD or None,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+        _log(f"拉起了：{WATCH_CMD}")
+        if _ATRIUM_DIR and os.path.isdir(_ATRIUM_DIR):
+            _log(f"  PYTHONPATH 加了 {_ATRIUM_DIR}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        _log(f"拉起失败：{type(e).__name__}: {e}")
+        return False
+
+
+# ----------------------------------------------------------------------
+# 冷却 / 连续失败
 # ----------------------------------------------------------------------
 
 _last_restart = 0.0
-_consecutive_fail = 0
+_fails = 0
+_lock = threading.Lock()
 
 
-def handle_request() -> None:
-    global _last_restart, _consecutive_fail
+def _in_cooldown() -> bool:
+    return (time.time() - _last_restart) < COOLDOWN
 
-    # 冷却期内直接拒绝——这条是为了保护 QQ 号，不是保护服务
-    since = time.time() - _last_restart
-    if _last_restart and since < COOLDOWN:
-        wait = int(COOLDOWN - since)
-        _write_result({"status": "rejected", "reason": f"冷却中，还要等 {wait} 秒"})
-        _log(f"拒绝重启请求：冷却中，还要等 {wait} 秒")
-        _consume_request()
-        return
 
-    # 连续失败太多次就停手，等人来看
-    if _consecutive_fail >= MAX_CONSECUTIVE_FAIL:
-        _write_result({
-            "status": "stuck",
-            "reason": f"连续失败 {_consecutive_fail} 次，已停止自动重启。删掉 {STUCK} 才会恢复。",
-        })
-        _log(f"连续失败 {_consecutive_fail} 次，停手")
+def _note_fail() -> bool:
+    """记一次失败。返回 True 表示已经到上限，别再试了。"""
+    global _fails
+
+    with _lock:
+        _fails += 1
+        n = _fails
+
+    if n >= MAX_FAILS:
         try:
             with open(STUCK, "w", encoding="utf-8") as f:
-                f.write(datetime.now().isoformat())
+                f.write(f"连续失败 {n} 次，停手了。\n"
+                        f"{datetime.now().isoformat()}\n")
         except OSError:
             pass
-        _consume_request()
-        return
+        _log(f"连续失败 {n} 次，写 .stuck 停手")
+        return True
 
-    # 请求太旧就当没看见（防止积压的文件突然全触发）
+    return False
+
+
+def _note_ok() -> None:
+    global _fails
+
+    with _lock:
+        _fails = 0
+
     try:
-        age = time.time() - os.path.getmtime(REQUEST)
-        if age > REQUEST_STALE:
-            _log(f"请求文件太旧（{int(age)}秒），忽略")
-            _consume_request()
-            return
+        os.remove(STUCK)
     except OSError:
-        return
+        pass
 
-    reason = ""
+
+# ----------------------------------------------------------------------
+# 重启
+# ----------------------------------------------------------------------
+
+def _do_restart(reason: str, requester: str = "") -> bool:
+    """重启一次，返回成功没有。"""
+    global _last_restart
+
+    if os.path.exists(STUCK) and not requester:
+        # 手动请求可以绕过 .stuck，自动的绕不过
+        _log("有 .stuck，自动重启跳过")
+        return False
+
+    if _in_cooldown() and not requester:
+        left = int(COOLDOWN - (time.time() - _last_restart))
+        _log(f"冷却中（还有 {left} 秒），跳过")
+        return False
+
+    _last_restart = time.time()
+
+    # ⚠️ 空字符串要显示成"看门狗自己"，
+    #    但 requester 是空就是空 —— 别在这里改它的语义。
+    shown = requester or "看门狗自己"
+    _log(f"开始重启：{reason}（请求方：{shown}）")
+
+    if _is_alive():
+        _log("它还在跑，先杀掉")
+        if not _kill_tree():
+            _log("杀不掉")
+            _note_fail()
+            return False
+
+    if not _start():
+        _log("拉不起来")
+        _note_fail()
+        return False
+
+    _log("等它活过来……")
+    if _wait_alive():
+        _log("重启成功")
+        _note_ok()
+        return True
+
+    _log("等超时了，没活过来")
+    _note_fail()
+    return False
+
+
+def _handle_request() -> None:
+    """处理一次重启请求。"""
+    # ⚠️ global 必须放在函数开头。
+    #    放在 if 里面虽然语法上能过，
+    #    但读的人会以为只有那个分支才改全局。
+    global _last_restart
+
     try:
         with open(REQUEST, encoding="utf-8") as f:
-            reason = f.read().strip()[:200]
+            raw = f.read().strip()
     except OSError:
-        pass
+        raw = ""
 
-    _log(f"开始重启。理由: {reason or '(未说明)'}")
-    started = time.time()
+    who = ""
+    reason = "外部请求"
+    force = False
+    if raw:
+        try:
+            d = json.loads(raw)
+            if isinstance(d, dict):
+                who = str(d.get("who") or "")
+                reason = str(d.get("reason") or reason)
+                force = bool(d.get("force"))
+        except json.JSONDecodeError:
+            reason = raw[:100]
 
-    already_up = _port_open()
-    killed = _kill_astrbot_tree() if already_up else True
+    # ⚠️ force=True 绕过冷却和 .stuck。
+    #
+    #    为什么要这个：
+    #        冷却期是防"反复重启被风控"的，
+    #        但用户手动点重启的时候，他知道自己在干什么 ——
+    #        不该被冷却挡住。
+    #
+    #    实测（2026-11-04）：测试时刚重启完又崩了，
+    #    冷却期让看门狗干看着不动，得等 5 分钟。
+    if force:
+        _log(f"强制重启（绕过冷却）：{reason}（请求方：{who or '手动'}）")
+        _last_restart = 0.0
+        try:
+            os.remove(STUCK)
+        except OSError:
+            pass
 
-    if not _start_astrbot():
-        _consecutive_fail += 1
-        _write_result({"status": "error", "reason": "拉起命令失败"})
-        _consume_request()
-        return
+    # ⚠️ 请求方要区分清楚：
+    #    有 who 就用 who；
+    #    强制但没写 who，说明是手动点的；
+    #    都没有才是"看门狗自己发现的"。
+    #
+    #    以前这里传的是 `who or "手动"`，
+    #    但 _do_restart 里又判断 truthy，
+    #    结果日志里印成"看门狗自己"，看不出是谁要重启。
+    requester = who or ("手动" if force else "")
 
-    ready = _wait_ready()
-    elapsed = round(time.time() - started, 1)
+    ok = _do_restart(reason, requester)
 
-    if ready:
-        _last_restart = time.time()
-        _consecutive_fail = 0
-        _write_result({
-            "status": "ok",
-            "seconds": elapsed,
-            "was_running": already_up,
-            "reason": reason,
-        })
-        _log(f"重启成功，用时 {elapsed} 秒")
-    else:
-        _consecutive_fail += 1
-        _write_result({
-            "status": "error",
-            "reason": f"{READY_TIMEOUT} 秒内端口没起来（第 {_consecutive_fail} 次失败）",
-            "seconds": elapsed,
-        })
-        _log(f"重启失败：{READY_TIMEOUT} 秒内 {PORT} 没起来")
-
-    _consume_request()
-
-
-def _write_result(rec: dict) -> None:
-    rec["at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-    tmp = RESULT + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False)
-        os.replace(tmp, RESULT)
+        with open(RESULT, "w", encoding="utf-8") as f:
+            json.dump({
+                "ok": ok,
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "reason": reason,
+            }, f, ensure_ascii=False)
     except OSError:
         pass
 
-
-def _consume_request() -> None:
     try:
         os.remove(REQUEST)
     except OSError:
@@ -310,192 +449,153 @@ def _consume_request() -> None:
 
 
 # ----------------------------------------------------------------------
-# 目录监控（事件驱动，不轮询）
+# 目录监听（Windows）
 # ----------------------------------------------------------------------
 
-# ReadDirectoryChangesW 的最小可用封装。只用这一件事，不做通用库。
-_INVALID_HANDLE = ctypes.c_void_p(-1).value
-_FILE_LIST_DIRECTORY = 0x0001
-_FILE_SHARE_READ = 0x00000001
-_FILE_SHARE_WRITE = 0x00000002
-_FILE_SHARE_DELETE = 0x00000004
-_OPEN_EXISTING = 3
-_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-_FILE_NOTIFY_CHANGE_FILE_NAME = 0x00000001
-_FILE_NOTIFY_CHANGE_LAST_WRITE = 0x00000010
-_FILE_NOTIFY_CHANGE_SIZE = 0x00000008
+FILE_NOTIFY_CHANGE_LAST_WRITE = 0x10
+FILE_NOTIFY_CHANGE_FILE_NAME = 0x01
 
 
-# ----------------------------------------------------------------------
-# 主动体检：没人请求，也要知道服务死没死
-# ----------------------------------------------------------------------
+def _watch_dir_loop(stop: threading.Event) -> None:
+    """盯 restart.request 的变化。
 
-_miss_count = 0
-
-
-def probe_loop() -> None:
-    """每隔 PROBE_SECONDS 查一次端口，连续 MISS 次不通就拉起来。
-
-    ⚠️ 这条是别人指出来的，指得对：
-        第一版只做了"有人写 restart.request 才重启"。
-        但 AstrBot 自己崩了的时候，**没有人会写那个文件**——
-        守护进程就那么干看着，等于没装。
-
-        真正的守护得主动体检。
-
-    为什么是轮询而不是事件：
-        服务死掉这件事不会通知任何人，没有可监听的事件源。
-        只能去问。30 秒问一次，开销可以忽略（一次 TCP 连接尝试）。
-
-    为什么要连续 MISS 次才动手：
-        偶尔一次连不上（正在启动、系统卡顿）不算死。
-        连续三次都连不上（约 90 秒）才算。
+    ⚠️ 这是 Windows 专有的。起不来就靠轮询兜底。
     """
-    global _miss_count
-    while True:
-        time.sleep(PROBE_SECONDS)
-
-        if _port_open():
-            if _miss_count:
-                _log(f"服务恢复（之前漏了 {_miss_count} 次探测）")
-            _miss_count = 0
-            continue
-
-        _miss_count += 1
-        _log(f"体检：{PORT} 端口不通（第 {_miss_count}/{PROBE_MISS_LIMIT} 次）")
-
-        if _miss_count < PROBE_MISS_LIMIT:
-            continue
-
-        # 连续多次不通 —— 判定挂了，走同一套重启流程
-        _log("连续探测不到，判定服务已挂，开始拉起")
-        try:
-            _auto_restart()
-        except Exception:  # noqa: BLE001
-            _log("自动拉起时异常:\n" + traceback.format_exc())
-        _miss_count = 0
-
-
-def _auto_restart() -> None:
-    """自动拉起。走和手动请求一样的防护逻辑，但不读请求文件。"""
-    global _last_restart, _consecutive_fail
-
-    if _consecutive_fail >= MAX_CONSECUTIVE_FAIL:
-        _log(f"连续失败 {_consecutive_fail} 次，停止自动拉起（删 {STUCK} 才恢复）")
-        try:
-            with open(STUCK, "w", encoding="utf-8") as f:
-                f.write(datetime.now().isoformat())
-        except OSError:
-            pass
-        return
-
-    since = time.time() - _last_restart
-    if _last_restart and since < COOLDOWN:
-        _log(f"冷却中（还要等 {int(COOLDOWN - since)} 秒），这次不拉")
-        return
-
-    started = time.time()
-    if not _start_astrbot():
-        _consecutive_fail += 1
-        _log("自动拉起：启动命令失败")
-        return
-
-    if _wait_ready():
-        _last_restart = time.time()
-        _consecutive_fail = 0
-        _log(f"自动拉起成功，用时 {round(time.time() - started, 1)} 秒")
-    else:
-        _consecutive_fail += 1
-        _log(f"自动拉起失败：{READY_TIMEOUT} 秒内 {PORT} 没起来（第 {_consecutive_fail} 次）")
-
-
-def watch_loop() -> None:
-    """监听目录变化。
-
-    ⚠️ 这里返工过一次，原因值得留：
-        第一版用 ctypes 直接调 ReadDirectoryChangesW。
-        实测写文件进去，守护进程 CPU 一直是 0、没有任何反应——
-        调用卡在里面没返回，参数拼错也不报错。
-
-        ctypes 拼 Win32 结构太容易出无声的错，
-        改用 pywin32 的 win32file，它把这层封装好了。
-    """
-    import win32con
-    import win32file
-
     try:
-        handle = win32file.CreateFile(
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        CreateFileW = kernel32.CreateFileW
+        CreateFileW.restype = wintypes.HANDLE
+        CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+
+        handle = CreateFileW(
             BRIDGE_DIR,
-            win32con.GENERIC_READ,
-            win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE | win32con.FILE_SHARE_DELETE,
+            0x0001,          # FILE_LIST_DIRECTORY
+            0x0007,          # SHARE_READ | SHARE_WRITE | SHARE_DELETE
             None,
-            win32con.OPEN_EXISTING,
-            win32con.FILE_FLAG_BACKUP_SEMANTICS,
+            3,               # OPEN_EXISTING
+            0x02000000,      # FILE_FLAG_BACKUP_SEMANTICS
             None,
         )
-    except Exception as e:  # noqa: BLE001
-        _log(f"打不开目录监控: {e}")
-        return
+        if handle == wintypes.HANDLE(-1).value:
+            raise OSError(ctypes.get_last_error(), "CreateFileW 失败")
 
-    target = os.path.basename(REQUEST).lower()
-    _log(f"开始监听 {BRIDGE_DIR}")
+        buf = ctypes.create_string_buffer(4096)
+        returned = wintypes.DWORD()
 
-    while True:
-        try:
-            # 阻塞等待，有变化才返回。没有事件时这个进程不占 CPU。
-            results = win32file.ReadDirectoryChangesW(
+        ReadDirectoryChangesW = kernel32.ReadDirectoryChangesW
+        ReadDirectoryChangesW.restype = wintypes.BOOL
+        ReadDirectoryChangesW.argtypes = [
+            wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+            wintypes.BOOL, wintypes.DWORD, wintypes.LPDWORD,
+            wintypes.LPDWORD, wintypes.LPVOID,
+        ]
+
+        _log("目录监听起来（等 restart.request）")
+
+        while not stop.is_set():
+            ok = ReadDirectoryChangesW(
                 handle,
-                8192,
+                buf,
+                len(buf),
                 False,
-                win32con.FILE_NOTIFY_CHANGE_FILE_NAME
-                | win32con.FILE_NOTIFY_CHANGE_LAST_WRITE
-                | win32con.FILE_NOTIFY_CHANGE_SIZE,
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
+                ctypes.byref(returned),
                 None,
                 None,
             )
-        except Exception as e:  # noqa: BLE001
-            _log(f"读取通知失败: {e}，5 秒后重试")
-            time.sleep(5)
-            continue
+            if not ok:
+                _log("ReadDirectoryChangesW 失败，靠轮询兜底")
+                return
 
-        hit = False
-        for _action, name in results or []:
-            if str(name).lower() == target:
-                hit = True
-                break
+            if os.path.exists(REQUEST):
+                _handle_request()
 
-        if hit and os.path.exists(REQUEST):
-            try:
-                handle_request()
-            except Exception:  # noqa: BLE001
-                _log("处理请求时异常:\n" + traceback.format_exc())
+    except Exception as e:  # noqa: BLE001
+        _log(f"目录监听起不来（{type(e).__name__}: {e}），靠轮询兜底")
 
 
+def _poll_loop(stop: threading.Event) -> None:
+    """兜底：定期看两眼。
 
-def main() -> None:
-    _log("守护启动")
+    看两件事：
+        一、有没有 restart.request
+        二、它是不是自己崩了
+    """
+    _log(f"轮询模式：每 {int(CHECK_EVERY)} 秒看一次")
 
-    # 启动时如果服务就是死的，顺手拉一把 —— 这不消耗任何东西，只是开机自检
-    if not _port_open():
-        _log("启动时发现 AstrBot 没在跑，先拉起")
-        if _start_astrbot() and _wait_ready():
-            _log("自检拉起成功")
+    while not stop.is_set():
+        stop.wait(CHECK_EVERY)
+        if stop.is_set():
+            break
+
+        try:
+            if os.path.exists(REQUEST):
+                _handle_request()
+                continue
+
+            if not _is_alive():
+                age = _heartbeat_age()
+                why = "没有心跳" if age is None else f"心跳 {age:.0f} 秒没更新"
+                _log(f"发现它不活了（{why}），自动拉起")
+                _do_restart(why, "")
+        except Exception:  # noqa: BLE001
+            _log("轮询出错：\n" + traceback.format_exc())
+
+
+# ----------------------------------------------------------------------
+# 入口
+# ----------------------------------------------------------------------
+
+def main() -> int:
+    _log("=" * 50)
+    _log("看门狗启动")
+    _log(f"守护命令：{WATCH_CMD}")
+    _log(f"判活阈值：心跳 {int(DEAD_AFTER)} 秒不更新算挂")
+    _log(f"冷却期：{int(COOLDOWN)} 秒；连续失败 {MAX_FAILS} 次停手")
+
+    if os.path.exists(STUCK):
+        _log("⚠️ 有 .stuck 文件 —— 之前连续失败过。"
+             "手动重启请求仍然有效，自动拉起不会做。")
+
+    # 起来先看一眼
+    if not _is_alive():
+        age = _heartbeat_age()
+        _log("启动时发现它没在跑"
+             + ("（没有心跳）" if age is None else f"（心跳 {age:.0f} 秒前）")
+             + "，先拉起")
+        if _start() and _wait_alive():
+            _log("起来了")
+            _note_ok()
         else:
-            _log("自检拉起失败，继续监听请求")
+            _log("没起来")
+            _note_fail()
+    else:
+        _log("它已经在跑，继续盯着")
 
-    # 两条线并行：一条听"有人要重启"，一条定期体检"服务还活着吗"
-    t = threading.Thread(target=probe_loop, daemon=True, name="probe")
+    stop = threading.Event()
+
+    # 目录监听（主线）
+    t = threading.Thread(target=_watch_dir_loop, args=(stop,), daemon=True)
     t.start()
-    _log(f"主动体检已启动，每 {PROBE_SECONDS} 秒一次")
 
-    watch_loop()
+    # 轮询（兜底 + 自己崩了也能发现）
+    t2 = threading.Thread(target=_poll_loop, args=(stop,), daemon=True)
+    t2.start()
+
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        _log("收到中断，退出")
+        stop.set()
+
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        _log("收到 Ctrl+C，退出")
-    except Exception:  # noqa: BLE001
-        _log("守护崩了:\n" + traceback.format_exc())
-        raise
+    sys.exit(main())

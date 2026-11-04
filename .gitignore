@@ -49,3 +49,10 @@ workspaces/
 _tmp/
 # 临时会话 / pytest 临时目录
 .session.json
+# 看门狗运行时产生的
+watchdog.log
+restart.request
+restart.result
+restart.stuck
+wd_out.log
+wd_err.log

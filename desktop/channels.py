@@ -17,7 +17,7 @@
     「只开 QQ」  = 起 AstrBot + 拉起 QQ 客户端 + 关掉飞书平台
 
 怎么操作 AstrBot 里的平台
-    插件 astrbot_plugin_dsh_channels 开了个本机接口（6186），
+    （以前是 AstrBot 插件开的，那个插件已经删了 —— 通道管理现在归 atrium）
     能热启停平台——不用重启 AstrBot（那要 90 秒）。
 
     这个模块只是它的客户端。

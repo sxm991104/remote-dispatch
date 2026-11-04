@@ -227,10 +227,14 @@ def test_perms_list_not_truncated(isolated):
 
     # 真实环境里窗口数经常超过 20，这正是当初截断暴露出来的场景。
     # 这里只能验"没被硬切成 20"，不能假定一定有多少个。
-    src = open(os.path.join(_ROOT, "plugins", "astrbot_plugin_dsh_bridge.py"),
+    #
+    # ⚠️ 这一条原来扫的是 AstrBot 插件（plugins/astrbot_plugin_dsh_bridge.py）。
+    #    那个插件已经删了 —— 前台搬去了 atrium 项目。
+    #    现在扫这个仓库自己的代码，确保没人在这儿重新写死 20。
+    src = open(os.path.join(_ROOT, "server", "api_server.py"),
                encoding="utf-8").read()
     code = "\n".join(_code_lines(src))
-    assert "tasks[-20:]" not in code, "插件里又在截断成 20 个了"
+    assert "tasks[-20:]" not in code, "接口里又在截断成 20 个了"
     assert isinstance(tasks, list)
 
 
