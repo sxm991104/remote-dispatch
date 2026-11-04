@@ -239,7 +239,41 @@ def _check_action(name: str, arguments: str) -> str | None:
         抛异常会让整个任务失败。而不可逆动作**有时候真的需要做**
         （清理垃圾、重装依赖），一刀切禁掉就没法用了。
         拦截应该造成"模型知道被拦了"，不是"任务挂了"。
+
+    ## ⚠️ 动作层要听安全模式
+
+        模式二（出事可回退）的定义是：
+            「别管我，出事我自己退回去」
+            —— 不拦、不审、不弹码，只靠 VSS 回退。
+
+        所以这个模式下的动作层**必须放行**。
+        原来这里不看模式，于是用户选了 rollback，
+        `rm -rf /` 还是被拦 —— 跟他自己的选择矛盾。
+
+        （实测 2026-11-04：三种模式测下来，
+          rollback 下动作层照样拦，跟配置表对不上。）
+
+    ## ⚠️ 但权限档不动
+
+        动作层放行 ≠ 什么都能干：
+
+            动作层    "这条命令本身看着危险"
+            权限档    "你没资格碰这个路径"
+
+        权限档是另一套（task_perms），
+        它跟安全模式无关 —— 工作区权限就只该能动任务目录，
+        用户选 rollback 不代表允许它去写 C:\\Windows。
     """
+    # ── 先看模式 ──
+    try:
+        from guard import security_mode as _sm
+
+        if not _sm.wants("guard"):
+            return None
+    except Exception:  # noqa: BLE001
+        # 模式读不出来 → 按严格处理，别放行
+        pass
+
     try:
         from guard import action_guard as ag
     except ImportError:

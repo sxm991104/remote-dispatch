@@ -360,82 +360,56 @@ class Launcher:
         return True, "对话服务已经关掉。"
 
 
-    # ── 按通道启停 ────────────────────────────────────────
+    # ── 通道状态 ──────────────────────────────────────────
     #
-    # 有了这几个方法，桌面端就能：
-    #     只开飞书 → 起 AstrBot + 关掉 QQ 平台（不带 QQ 客户端）
-    #     只开 QQ  → 起 AstrBot + 拉 QQ 客户端 + 关掉飞书平台
-    #     全开     → 两个都开
+    # ⚠️ 这一块原来是"按通道启停"，管 QQ 和飞书两条。
     #
-    # 背景：原来点一次「启动」，QQ 和飞书一起起来。
-    # 只用飞书的人白背着 QQ 客户端那几百兆，低配机直接卡。
-
-    def start_channel(self, which: str) -> None:
-        """启动一条通道。which 是 "qq" 或 "feishu"。
-
-        AstrBot 是宿主，两条通道都要它。所以这里先确保它在跑。
-        """
-        from desktop import channels as ch
-
-        self.last_error = ""
-
-        # 1) 宿主
-        if not self.bot_running():
-            self.start_bot()
-            # 等它的启停接口就绪
-            ch.wait_ready(timeout=150)
-
-        # 2) QQ 通道还要额外把客户端拉起来
-        if which == "qq":
-            if not self.qq_running():
-                self.start_qq()
-                self._watch_until_qq_ready()
-
-        # 3) 在 AstrBot 里把这条通道打开
-        pid = "qq-napcat" if which == "qq" else "feishu"
-        r = ch.enable(pid)
-        if not r.get("ok"):
-            self.last_error = f"打开 {which} 通道失败：{r.get('error')}"
-
-        # 4) 顺手把另一条关掉——用户点的是「只开这个」
-        other = "feishu" if which == "qq" else "qq-napcat"
-        ch.disable(other)
-
-    def stop_channel(self, which: str) -> None:
-        """关掉一条通道。
-
-        QQ 关了之后连客户端一起停——不然内存还是占着。
-        飞书只断连接，不需要额外动作。
-        """
-        from desktop import channels as ch
-
-        pid = "qq-napcat" if which == "qq" else "feishu"
-        ch.disable(pid)
-
-        if which == "qq":
-            # 客户端留着它也没用，一起停
-            if self.qq_running():
-                self.stop_qq()
-
-    def _watch_until_qq_ready(self, timeout: float = 120.0) -> None:
-        """等 NapCat 的 3000 端口起来。"""
-        import time
-
-        end = time.time() + timeout
-        while time.time() < end:
-            if self.port_open(3000):
-                return
-            time.sleep(1.5)
+    #    现在两条都不归这儿管了：
+    #        QQ      —— 不支持了（前台搬去 atrium，QQ 个人号那条路删了）
+    #        飞书    —— 接平台是 atrium 的事，不是 AstrBot 的事
+    #
+    #    桌面端只管一件事：**这个仓库自己跑不跑**。
+    #    接哪个聊天平台，去 atrium 那边配。
 
     def channels_status(self) -> dict:
-        """两条通道现在的状态，给界面显示。"""
-        from desktop import channels as ch
+        """通道状态，给界面显示。
 
-        return ch.status()
+        ⚠️ 现在只有两项：
+            bridge   这个仓库自己的服务（8790）通不通
+            feishu   **不再由这里管** —— 留着字段是为了界面不用改，
+                     值恒为 False（表示"这儿没在跑"）
+        """
+        out = {"qq": False, "feishu": False, "bridge": False}
+
+        try:
+            out["bridge"] = self.bot_running()
+        except Exception:  # noqa: BLE001
+            pass
+
+        return out
 
     def set_channel(self, which: str, on: bool) -> None:
-        """开或关一条通道。which 是 "qq" / "feishu"。"""
-        if on:
-            self.start_channel(which)
-        else:
-            self.stop_channel(which)
+        """开或关一条通道。
+
+        ⚠️ 只认 "bridge"（这个仓库自己）。
+           "qq" / "feishu" 调过来是空操作 ——
+           接平台归 atrium，这里不该越权去动。
+
+           一声不响地忽略不好，所以留个 last_error 说明。
+        """
+        if which == "bridge":
+            if on:
+                self.start_bot()
+            else:
+                self.stop_bot()
+            return
+
+        if which in ("qq", "feishu"):
+            self.last_error = (
+                f"「{which}」通道不归这里管了。"
+                f"接平台去 atrium 那边配（python -m atrium.cli init）。"
+            )
+            return
+
+        self.last_error = f"不认识的通道：{which}"
+

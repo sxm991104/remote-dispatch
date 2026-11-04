@@ -1103,6 +1103,16 @@ def pending_deletes(task_id: str = "") -> list[str]:
     ⚠️ 现在从盘上读，不再只看内存。
         内存那份是给"同一个进程里连着跑几条命令"用的，
         盘上那份是给"用户给了码、另一个进程要真删"用的。
+
+    ⚠️ 这个函数原来定义了**两次** —— 下面还有个
+       `pending_deletes()` 不收参数，把这份覆盖了。
+       结果 commit_pending_deletes 传 task_id 进来直接 TypeError，
+       解锁之后"待确认的删除"永远做不掉。
+
+       实测（2026-11-04）：解锁时提示
+       "（待确认的删除没做完：TypeError）"。
+
+       跟之前 versions_of 重复定义是同一类错。
     """
     d = _load_pending()
     if task_id:
@@ -1113,11 +1123,6 @@ def pending_deletes(task_id: str = "") -> list[str]:
             if f not in out:
                 out.append(f)
     return out
-
-
-def pending_deletes() -> list[str]:
-    """还没确认的删除。"""
-    return list(_PENDING_DELETES)
 
 
 def commit_pending_deletes(task_id: str = "") -> list:

@@ -118,9 +118,20 @@ class ServicesPageMixin:
             #    因为 QQ 那条路靠 NapCat 往 QQ 进程注入 DLL，
             #    依赖客户端内部结构、条款上是灰区。
             #    用户该知道这两类的差别，而不是看成一排等价的选择。
+            #
+            # ⚠️ 2026-11-04：QQ 那一项**从界面上拿掉了**。
+            #
+            #    不是代码删了 —— 下面 _svc_action / _start / _stop 里
+            #    那些 qq 分支都还留着，将来接 QQ 官方 Bot 时能参考
+            #    "一条通道应该怎么启停"。
+            #
+            #    但**不再对用户暴露**：点不了的东西不该占一个标签页。
+            #    用户看到"QQ 通道"却永远点不亮，只会以为软件坏了。
+            #
+            #    要恢复：把下面这行 qq 的元组加回来就行。
+            # ("qq", "QQ 通道（社区方案）",
+            #  "靠 NapCat 注入 QQ 客户端，占内存；依赖 QQ 版本，有风控风险"),
             ("feishu", "飞书通道", "官方接口，纯网络连接，很轻，几秒钟就能开"),
-            ("qq", "QQ 通道（社区方案）",
-             "靠 NapCat 注入 QQ 客户端，占内存；依赖 QQ 版本，有风控风险"),
             ("bridge", "任务端", "真正在电脑上干活的那个，跟通道无关"),
         ):
             card = ServiceCard(key, title, desc)
@@ -158,12 +169,22 @@ class ServicesPageMixin:
 
     # ── 设置页 ──
     def _on_qq_stopped(self) -> None:
-        """用户放弃扫码，QQ 已经停掉。界面回到干净状态。"""
+        """用户放弃扫码，QQ 已经停掉。界面回到干净状态。
+
+        ⚠️ 2026-11-04：QQ 通道从界面上拿掉了，这里**基本不会被调到了**。
+           但保留着 —— 代码留着，将来接 QQ 官方 Bot 时能改改就用。
+
+        ⚠️ 顶栏那个 QQ 灯也删了，所以 self.pills["qq"] 会 KeyError。
+           改成 .get() 拿，拿不到就跳过。
+        """
         card = self.svc_cards.get("qq")
         if card:
             card.clear_working()
             card.set_ok(False)
-        self.pills["qq"].set_color(C_BAD)
+
+        dot = self.pills.get("qq")
+        if dot is not None:
+            dot.set_color(C_BAD)
 
     def _on_services(self, d: dict) -> None:
         """服务状态变了。按钮和顶栏都跟着刷新。

@@ -356,13 +356,17 @@ class MainWindow(
         lay.addWidget(mark)
         lay.addStretch()
 
-        # 顶栏三个状态胶囊。
+        # 顶栏状态胶囊。
         #
         # ⚠️ 第一版这里出了问题：QFrame 默认会被父布局拉满高度，
         #    胶囊变成三个高瘦的长条，中间还露出奇怪的竖线。
         #    必须显式 setFixedHeight，并且用 AlignVCenter 传到布局里。
+        #
+        # ⚠️ 原来还有第三个 "qq" —— 那个通道已经不支持了
+        #    （前台搬去 atrium 了，QQ 个人号那条路整个删掉）。
+        #    留着的话顶栏永远挂一个灭着的 QQ 灯，用户以为坏了。
         self.pills = {}
-        for key, label in (("qq", "QQ"), ("feishu", "飞书"), ("bridge", "任务端")):
+        for key, label in (("feishu", "飞书"), ("bridge", "任务端")):
             pill = QFrame()
             pill.setFixedHeight(26)
             pill.setStyleSheet(

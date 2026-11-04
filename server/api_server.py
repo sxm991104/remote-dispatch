@@ -56,7 +56,7 @@ import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 
 def _app_dir() -> str:
     """程序所在目录。源码运行时是脚本目录，打包成 exe 后是 exe 所在目录。
@@ -231,37 +231,33 @@ def _listening_pids(port: int) -> list[str]:
 
 
 def https_status() -> dict:
-    """三个开关各自的状态。
+    """服务状态，给界面显示。
 
-    QQ 和飞书看的是"这条通道真的连上没有"，不是"进程在不在"。
-    进程起着但连接断了，用户一样用不了，就该显示成关的。
+    ## ⚠️ 这一块原来查的是 AstrBot 和 NapCat
 
-    任务端没有常驻进程，永远是通的——它每次派活才起。
+        以前：
+            qq       看 NapCat 的 3000 端口 + AstrBot 的 6185
+            feishu   看 AstrBot 里 lark 平台连没连上
+            bridge   恒为 True
+
+        现在那两套都没了：
+            QQ       不支持了（NapCat 那条路删了）
+            飞书     接平台归 atrium，不归这个仓库
+
+        所以只剩一项真状态：**这个仓库自己的服务通没通**。
+
+    ## ⚠️ 为什么还留着 qq / feishu 两个键
+
+        界面那三个灯是按这两个键取值的。
+        直接删掉会让界面拿到 None，判成"没开"，全变红。
+
+        留着键、值恒为 False，意思是"这儿没在管这条通道"——
+        比删掉安全。
     """
-    qq_ok = False
-    fs_ok = False
-    try:
-        from desktop import channels as _ch
-
-        d = _ch.status()
-        if d.get("ok"):
-            for p in d.get("platforms") or []:
-                if p.get("type") == "aiocqhttp":
-                    qq_ok = bool(p.get("connected"))
-                elif p.get("type") == "lark":
-                    fs_ok = bool(p.get("connected"))
-        else:
-            # 启停接口还没起来（AstrBot 刚启动或者没起），
-            # 退回看端口——至少能反映"宿主开着没有"
-            qq_ok = _port_ok(_NAPCAT_PORT) and _port_ok(_BOT_PORT)
-            fs_ok = _port_ok(_BOT_PORT)
-    except Exception:  # noqa: BLE001
-        qq_ok = _port_ok(_NAPCAT_PORT)
-        fs_ok = _port_ok(_BOT_PORT)
-
+    # 能跑进来就说明这个服务活着
     return {
-        "qq": qq_ok,
-        "feishu": fs_ok,
+        "qq": False,
+        "feishu": False,
         "bridge": True,
     }
 
@@ -466,6 +462,31 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/tasks":
             return self._tasks()
+
+        if path == "/api/asks":
+            # 电脑端卡住时推回来的问题。
+            #
+            # ⚠️ 为什么不复用 /api/task/<id>：
+            #
+            #    那个查的是"某一个任务现在怎么样"，
+            #    这个是"有哪些任务在等用户回答" —— 跨任务的。
+            #
+            #    前台要回答「它怎么不动了」只能看这个，
+            #    单个任务的状态回答不了。
+            #
+            # ⚠️ 这个是 GET（跟 /api/tasks 一样）。
+            #    limit 从 query string 读，不从 body ——
+            #    GET 没有 body，原来那样写会直接崩。
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                limit = int((q.get("limit") or ["5"])[0])
+            except (TypeError, ValueError):
+                limit = 5
+            try:
+                st, b = _json({"ok": True, "asks": bridge.read_asks(limit)})
+            except Exception as e:  # noqa: BLE001
+                st, b = _json({"error": f"{type(e).__name__}: {e}"}, 500)
+            return self._send(st, b)
 
         if path.startswith("/api/windows"):
             return self._windows(path)
