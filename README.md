@@ -1,6 +1,6 @@
 # remote-dispatch
 
-**v1.3.5**
+**v1.3.4**
 
 > 这个仓库是派活台的**「干活那一半」** —— 在电脑上真跑命令、真改文件。
 >
@@ -152,7 +152,7 @@ python desktop/app.py
 
 ## 版本
 
-当前 **v1.3.5**。改动见 [CHANGELOG.md](CHANGELOG.md)。
+当前 **v1.3.4**。改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
