@@ -78,6 +78,21 @@ class Reply:
     # 用量：算出花了多少 token，界面要显示
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # 缓存命中的输入 token。
+    #
+    # ⚠️ 这一项决定花多少钱：命中缓存通常只要 1/10 价。
+    #
+    #    原来没记它，所以费用只能"按最坏情况"估 ——
+    #    实际有缓存命中时会贵十倍地估。
+    #
+    #    各家的字段名不统一（实测 2026-11-05）：
+    #        标准 OpenAI   usage.prompt_tokens_details.cached_tokens
+    #        DeepSeek      usage.prompt_cache_hit_tokens
+    #                       和 prompt_cache_miss_tokens
+    #    两种都认，取到哪个用哪个。
+    cached_tokens: int = 0
+    # 推理 token（o1 这类模型会单独算钱）
+    reasoning_tokens: int = 0
     # 结束原因：stop / tool_calls / length
     finish_reason: str = ""
 
@@ -112,13 +127,23 @@ class LLM:
     """
 
     def __init__(self, base_url: str, api_key: str, model: str,
-                 timeout: int = 180):
+                 timeout: int = 180, profile_id: str = "",
+                 prices: dict | None = None):
         self.url = _normalize_base(base_url)
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         # 这个 Key 这家服务的频率限制。撞过 429 之后它就知道该隔多久。
         self.limiter = RateLimiter()
+
+        # ⚠️ profile_id 和 prices 是给"算真实花销"用的。
+        #
+        #    光有 model 名不够：同一个模型名在两家可能是两个价，
+        #    而且用户可能自己填了价（代理、折扣）。
+        #    所以把整套配置里的价格跟着对象走，
+        #    记花销时就不用再去读一遍配置文件。
+        self.profile_id = profile_id or ""
+        self.prices = prices or {}
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              max_tokens: int = 8192, temperature: float = 0.3) -> Reply:
@@ -293,6 +318,30 @@ class LLM:
         usage = data.get("usage") or {}
         reply.prompt_tokens = int(usage.get("prompt_tokens") or 0)
         reply.completion_tokens = int(usage.get("completion_tokens") or 0)
+
+        # ── 缓存命中 / 推理 token ──
+        #
+        # ⚠️ 各家字段名不一样，两种都认：
+        #
+        #     标准 OpenAI   prompt_tokens_details.cached_tokens
+        #     DeepSeek      prompt_cache_hit_tokens
+        #
+        #   实测 DeepSeek 两个都有（2026-11-05）：
+        #     {"prompt_tokens":34,"completion_tokens":20,
+        #      "prompt_tokens_details":{"cached_tokens":0},
+        #      "prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":34}
+        _pdet = usage.get("prompt_tokens_details") or {}
+        cached = 0
+        if isinstance(_pdet, dict) and _pdet.get("cached_tokens") is not None:
+            cached = int(_pdet.get("cached_tokens") or 0)
+        elif usage.get("prompt_cache_hit_tokens") is not None:
+            cached = int(usage.get("prompt_cache_hit_tokens") or 0)
+        reply.cached_tokens = max(0, cached)
+
+        _cdet = usage.get("completion_tokens_details") or {}
+        if isinstance(_cdet, dict):
+            reply.reasoning_tokens = int(_cdet.get("reasoning_tokens") or 0)
+
         return reply
 
 
@@ -312,16 +361,137 @@ def _explain_http(code: int) -> str:
 
 
 def test_connection(base_url: str, api_key: str, model: str) -> tuple[bool, str]:
-    """试一下能不能通。设置页的「测试连接」用它。"""
+    """试一下能不能通。设置页的「测试连接」用它。
+
+    ## ⚠️ 原来只走一步：让模型回一句话
+
+        llm.chat([{"role":"user","content":"只回复两个字：可以"}], max_tokens=20)
+
+        这一步能验证"地址对、Key 对、模型名对"，但**非常慢**。
+
+        实测（2026-11-05）：
+            审计员配的是 kimi-k2.6（推理模型），
+            测一次连了 **49.9 秒** ——
+            界面那边 timeout=60，用户看着"正在连…"几乎等满一分钟，
+            还以为卡死了。
+
+        推理模型先生成一大段思考再吐那两个字，等它想完就四十多秒。
+
+    ## 现在分两步
+
+        第一步（快）：GET /v1/models
+            验证地址、Key、能连通。一般 0.2-2 秒。
+            这一步失败就直接报错，不用再等第二步。
+
+        第二步（慢，但只在第一步通过时跑）：让它回一句话
+            验证"这个模型名真能调"——
+            有的服务 /models 里有，但实际没开权限。
+
+        ⚠️ 第二步仍然可能慢（推理模型就是这个脾气）。
+            所以：
+                · timeout 从 30 提到 45（够推理模型想完）
+                · 界面那边超时也放宽，并且明确告诉用户
+                  "推理模型会慢，可能要几十秒"
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    base = (base_url or "").strip().rstrip("/")
+    key = (api_key or "").strip()
+    mdl = (model or "").strip()
+
+    if not base or not key:
+        return False, "地址和 Key 都得填"
+
+    # ── 第一步：列模型（快）──
+    url = base + ("/models" if base.endswith("/v1") else "/models")
+    # 有的服务 base_url 已经带 /v1，有的不带。两种都试一下更稳。
+    candidates = []
+    if base.endswith("/v1"):
+        candidates.append(base + "/models")
+    else:
+        candidates.append(base + "/v1/models")
+        candidates.append(base + "/models")
+
+    last_err = ""
+    reachable = False
+    for u in candidates:
+        try:
+            req = urllib.request.Request(
+                u,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                raw = r.read()
+            try:
+                d = _json.loads(raw.decode("utf-8", "replace"))
+            except _json.JSONDecodeError:
+                d = {}
+            ids = [
+                str(x.get("id") or "")
+                for x in (d.get("data") or [])
+                if isinstance(x, dict)
+            ]
+            reachable = True
+
+            if mdl and ids and mdl not in ids:
+                # 地址和 Key 都对，但模型名不在列表里
+                shown = "、".join(ids[:8])
+                more = f" 等 {len(ids)} 个" if len(ids) > 8 else ""
+                return False, (
+                    f"地址和 Key 都对，但没有「{mdl}」这个模型。\n"
+                    f"可用的有：{shown}{more}"
+                )
+
+            # 模型名在列表里（或者服务没给列表）→ 走第二步
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return False, f"Key 不对（HTTP {e.code}）—— 核对一下这个 Key"
+            last_err = f"HTTP {e.code}"
+            continue
+        except Exception as e:  # noqa: BLE001
+            last_err = f"{type(e).__name__}: {e}"
+            continue
+
+    # ── 第二步：让它回一句话 ──
+    #
+    # ⚠️ **默认不跑。**
+    #
+    #    第一步 /models 已经验证了"能不能用"的全部条件：
+    #        地址对（连上了）、Key 对（没 401、没 403）、模型名对（列表里有）
+    #
+    #    第二步能多验证的只有"生成这条路通不通"。
+    #    但代价太大：实测 kimi-k2.6 光这一步就 **49 秒** ——
+    #    推理模型先生成一大段思考再吐两个字。
+    #
+    #    用户点「测试连接」要的就是"对不对"，不是"快不快地回句话"。
+    #    让他等五十秒换一个额外确认，不值。
+    #
+    #    只有连 /models 都取不到列表的服务（有些自建网关不实现这个接口）
+    #    才需要靠第二步来判断 —— 那种情况第二步是唯一手段。
+    if reachable:
+        head = f"通了。地址、Key、模型名都对"
+        if mdl:
+            head += f"（{mdl} 在可用列表里）"
+        return True, head
+
     try:
-        llm = LLM(base_url, api_key, model, timeout=30)
+        llm = LLM(base, key, mdl, timeout=45)
         reply = llm.chat(
             [{"role": "user", "content": "只回复两个字：可以"}],
             max_tokens=20,
         )
         text = (reply.content or "").strip()[:40]
-        return True, f"通了。它回了：{text or '(空)'}"
+        return True, (
+            f"通了（这个服务没给模型列表，靠对话验证的）。"
+            f"它回了：{text or '(空)'}"
+        )
     except LLMError as e:
-        return False, str(e)
+        return False, f"{e}（另外列模型也失败了：{last_err}）"
     except Exception as e:  # noqa: BLE001
-        return False, f"{type(e).__name__}: {e}"
+        return False, f"{type(e).__name__}: {e}（列模型也失败了：{last_err}）"

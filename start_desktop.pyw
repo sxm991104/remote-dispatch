@@ -22,7 +22,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-API_PORT = 8790
+API_PORT = int(os.environ.get("DSH_BRIDGE_PORT") or 8790)
 
 # ⚠️ 代码结构改过（v1.3.3）：入口文件挪进了子目录。
 #
@@ -108,15 +108,45 @@ def _pick_python() -> str:
         try:
             r = subprocess.run(
                 [exe, "-c", "import PySide6; print(1)"],
-                capture_output=True, timeout=25,
+                capture_output=True, timeout=10,
                 creationflags=0x08000000,   # NO_WINDOW
             )
             return r.returncode == 0
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def cache_file() -> str:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "dsh-bridge", "desktop_python.txt")
+
+    def cached() -> str:
+        try:
+            with open(cache_file(), encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def remember(exe: str) -> None:
+        try:
+            os.makedirs(os.path.dirname(cache_file()), exist_ok=True)
+            with open(cache_file(), "w", encoding="utf-8") as f:
+                f.write(exe)
+        except OSError:
+            pass
+
+    # 零、上次找到的那个。
+    #
+    #    每次双击都要把下面四个位置挨个探一遍，每个都要起一个
+    #    python 子进程 import PySide6（1 秒起）——等于每次开程序
+    #    先白等好几秒。上次已经验证能用的，这次直接用；
+    #    再探一次确认它没被卸掉就够了。
+    c = cached()
+    if c and has_pyside(c):
+        return c
+
     # 一、当前这个
     if has_pyside(sys.executable):
+        remember(sys.executable)
         return sys.executable
 
     # 二、同目录的 python.exe（pythonw 旁边通常有一个）
@@ -124,12 +154,14 @@ def _pick_python() -> str:
     for name in ("python.exe", "pythonw.exe"):
         p = os.path.join(d, name)
         if has_pyside(p):
+            remember(p)
             return p
 
     # 三、PATH
     for name in ("python", "python3"):
         p = shutil.which(name)
         if has_pyside(p):
+            remember(p)
             return p
 
     # 四、常见位置
@@ -147,6 +179,7 @@ def _pick_python() -> str:
     for pat in pats:
         for p in glob.glob(pat):
             if has_pyside(p):
+                remember(p)
                 return p
 
     return ""
@@ -208,18 +241,20 @@ def main() -> int:
                 stdin=subprocess.DEVNULL,
                 creationflags=0x08000000 | 0x00000008,  # NO_WINDOW | DETACHED
             )
+            # 告诉界面：后台已经在起了，你只管等它，别再起第二个。
+            # 两个进程抢同一个端口，只会有一个 listen 成功，日志还难看。
+            os.environ["DSH_BRIDGE_BACKEND_SPAWNED"] = "1"
         except OSError:
             pass
 
-        # 等它能响应，最多 15 秒
-        for _ in range(30):
-            time.sleep(0.5)
-            if port_ok(API_PORT):
-                break
+        # ⚠️ 这里原来要死等端口最多 15 秒，等到了才开界面。
+        #    结果是"双击之后先空白十几秒，窗口才出来"。
+        #    现在不等了 —— 界面自己先出来，后台进度显示在它上面，
+        #    用户至少知道程序已经开了。
 
     # 起界面。用同一个解释器，保持依赖一致。
     os.chdir(HERE)
-    return subprocess.call([sys.executable, UI_PY])
+    return subprocess.call([sys.executable, UI_PY], env=os.environ.copy())
 
 
 if __name__ == "__main__":

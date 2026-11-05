@@ -312,7 +312,39 @@ class SettingsAuditorMixin:
             return
         self.switch_auditor.setChecked(bool(d.get("enabled")))
         self.ed_auditor_url.setText(d.get("base_url") or "")
-        self.ed_auditor_key.setText(d.get("api_key") or "")
+
+        # ⚠️ **绝对不要把真 key 填进输入框。**
+        #
+        #    原来这里写的是 setText(d.get("api_key"))。
+        #    虽然框设了 EchoMode.Password（显示成圆圈），
+        #    但那只是**视觉**上的遮挡 —— 框里的内容还是明文，
+        #    Ctrl+A / Ctrl+C 一复制就拿到完整 key。
+        #
+        #    实测（2026-11-05）：老爸当场复现，说"这是很严重的明文 bug"。
+        #
+        #    现在跟主模型那张卡一个做法：
+        #        框永远是空的，只在 placeholder 里写"已保存 · 尾号 xxxx"。
+        #        用户要换就输入新的；留空表示不改。
+        # ⚠️ 服务端现在只回 has_key / key_tail，不回 api_key。
+        #
+        #    原来这里读 d.get("api_key") —— 服务端一改就永远读不到，
+        #    哪怕用户早就存了 key，界面也会说"还没填"。
+        #
+        #    （2026-11-05：为了堵住明文可复制，服务端改成只吐尾号了。）
+        _has = bool(d.get("has_key"))
+        _tail = str(d.get("key_tail") or "")
+        self._auditor_has_key = _has
+        self.ed_auditor_key.clear()
+        if _has:
+            self.ed_auditor_key.setPlaceholderText(
+                f"已保存 · 尾号 {_tail}    要换就输入新的，留空表示不改"
+            )
+            self.lbl_auditor_key_state.setText(f"✓ 已有 Key（尾号 {_tail}）")
+        else:
+            self.ed_auditor_key.setPlaceholderText(
+                "审核员自己的 key（可以跟主模型不同）"
+            )
+            self.lbl_auditor_key_state.setText("✗ 还没填 Key")
 
         # 模型名先塞进下拉框（哪怕列表还没拉）。
         #
@@ -398,20 +430,52 @@ class SettingsAuditorMixin:
         if sel == "手动输入…":
             sel = self.ed_auditor_model_manual.text().strip()
 
+        # ⚠️ Key 框**留空 = 不改**。
+        #
+        #    因为界面上不再回填真 key（防复制），框平时是空的。
+        #    如果留空就当"要清空 key"，用户改个模型名就把 key 弄丢了。
+        #    所以这里**不带 api_key 字段**，让服务端保留原来的。
         body = {
             "base_url": self.ed_auditor_url.text().strip(),
-            "api_key": self.ed_auditor_key.text().strip(),
             "model": sel,
         }
-        if not all(body.values()):
-            self.lbl_auditor_msg.setText("三样都要填")
+        _typed = self.ed_auditor_key.text().strip()
+        if _typed:
+            body["api_key"] = _typed
+
+        if not body["base_url"] or not body["model"]:
+            self.lbl_auditor_msg.setText("接口地址和模型名都得填")
+            return
+        if not _typed and not getattr(self, "_auditor_has_key", False):
+            self.lbl_auditor_msg.setText("还没填 Key")
             return
 
         def done(data):
+            # ⚠️ 不管成功失败，**立刻把 Key 框清空**。
+            #
+            #    老爸实测（2026-11-05）：点完保存，框里还留着那串 Key
+            #    （截图里是一整排圆点）—— 虽然 EchoMode.Password 挡住了字形，
+            #    但框里的内容还是明文，Ctrl+A / Ctrl+C 一复制就拿到。
+            #
+            #    原来只有"成功 → _load_auditor() 清空"这一条路：
+            #        · 服务端还没回 → 框里还是旧的
+            #        · 保存失败       → 永远不清
+            #        · 请求超时       → 永远不清
+            #    三条路都会把 Key 留在框里。
+            #
+            #    用户输进来的那一刻用途就结束了（已经赋给 body 里的 api_key），
+            #    留在界面上只有泄露的风险，没有任何好处。
+            try:
+                self.ed_auditor_key.clear()
+            except Exception:  # noqa: BLE001
+                pass
+
             if isinstance(data, dict) and data.get("ok"):
                 self.lbl_auditor_msg.setText(
                     "存好了" + ("" if data.get("ready") else f"（{data.get('why') or ''}）")
                 )
+                # 存完重新拉一次，拿到新的 key_tail / 状态
+                self._load_auditor()
             else:
                 self.lbl_auditor_msg.setText(
                     (data or {}).get("error") or "存不进去"

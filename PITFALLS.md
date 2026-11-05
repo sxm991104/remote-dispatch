@@ -489,3 +489,50 @@ cmd 按 UTF-8 读文件 → 中文完整
 
 **记住这一条：能控制编码的时候，永远选"一开始就对"，不要选"事后猜"。**
 
+### 桌面端：想"只开一个窗口"，光连一下命名管道是不够的
+
+第一版单实例是这么写的：能连上 `dsh-bridge-desktop` 这个管道，说明已经有实例，退出。
+
+**同时双击两次的时候，两个窗口都开出来了。**
+
+原因在 Windows 命名管道上：
+
+```
+进程 A：connect 失败 → removeServer → listen
+进程 B（晚 1 秒）：connect 时 A 还没 listen 完，也失败
+             → 两个都 removeServer + listen
+```
+
+Windows 的命名管道**允许同名多实例**，于是 B 也 listen 成功。
+两个窗口、两份定时器、两套轮询 —— 用户看到的就是"这程序在抽搐"。
+
+**正确的锁是文件级独占锁**：
+
+```python
+lock = QLockFile(path)        # 带 PID + 僵死检测，两个进程同时 tryLock 只可能有一个成功
+if not lock.tryLock(100):
+    poke_existing()           # 管道只留着"把已有窗口叫到前面"
+    return False
+```
+
+**记住这一条：判断"是不是只有我一个"，要用操作系统级的独占锁，
+不要用"连一下服务端"这种带竞态的办法。**
+
+### 验证桌面界面：`offscreen` 平台抓图是没有字体的
+
+想不打扰用户地看界面长什么样，很自然会用 `QT_QPA_PLATFORM=offscreen` 抓图。
+
+**抓出来全是方框。** offscreen 平台没有字体引擎，中文一个都渲染不出来 ——
+布局、间距、颜色都能看，**唯独字全废**，等于白看。
+
+可行的做法是 `QT_QPA_PLATFORM=windows` + `widget.setAttribute(Qt.WA_DontShowOnScreen, True)`：
+走真正的 Windows 字体和布局，但不上屏。
+
+另外两个小坑：
+
+- 同一个 widget **第二次 `grab()` 可能得到 0 字节的 PNG**（第一次 grab 会把
+  `WA_DontShowOnScreen` 改掉）。每次抓之前重设一次，或者只抓一次。
+- 往布局里新加了控件、**没跑一轮事件循环就 grab**，新控件是画不出来的
+  （`count()` 已经是 8，图里一行没有）。`processEvents()` 几次再抓。
+
+

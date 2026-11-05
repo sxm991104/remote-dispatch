@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import os
+
 # ── Qt ──
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
@@ -47,6 +49,30 @@ from PySide6.QtWidgets import (
 from widgets import (
     PathRow,
 )
+
+
+def _ver_gt(a: str, b: str) -> bool:
+    """版本号 a 比 b 新吗。只认点分隔的数字，别的当 0。
+
+    ⚠️ 不要用字符串比较 —— "1.10.0" < "1.9.0" 那种坑。
+    """
+    def _parts(v: str) -> list[int]:
+        out: list[int] = []
+        for x in (v or "").replace("-", ".").split("."):
+            n = ""
+            for ch in x:
+                if ch.isdigit():
+                    n += ch
+                else:
+                    break
+            out.append(int(n) if n else 0)
+        return out
+
+    pa, pb = _parts(a), _parts(b)
+    n = max(len(pa), len(pb))
+    pa += [0] * (n - len(pa))
+    pb += [0] * (n - len(pb))
+    return pa > pb
 
 from theme import (
     C_ACCENT, C_ACCENT2, C_ACCENT3, C_BAD, C_BG, C_DIM, C_DIM2,
@@ -93,7 +119,135 @@ class SettingsMiscMixin:
         self.lbl_auto.setStyleSheet(f"color:{C_DIM2};")
         al.addWidget(self.lbl_auto)
 
+        # 分隔线 + 版本行（设计稿里和开机自启同一张卡）
+        div = QFrame(); div.setFixedHeight(1)
+        div.setStyleSheet(f"background:{C_LINE};")
+        al.addWidget(div)
+
+        vrow = QHBoxLayout(); vrow.setSpacing(12)
+        vcol = QVBoxLayout(); vcol.setSpacing(0)
+        vh = QLabel("版本"); vh.setFont(font(11)); vh.setStyleSheet(f"color:{C_DIM2};")
+        vtxt = QLabel(self._read_version_text()); vtxt.setFont(font(11.5, QFont.DemiBold))
+        vcol.addWidget(vh); vcol.addWidget(vtxt)
+        vrow.addLayout(vcol, 1)
+        self.btn_check_update = QPushButton("检查更新")
+        self.btn_check_update.setObjectName("ghost")
+        self.btn_check_update.setCursor(Qt.PointingHandCursor)
+        self.btn_check_update.clicked.connect(self._check_updates)
+        vrow.addWidget(self.btn_check_update, 0, Qt.AlignTop)
+        al.addLayout(vrow)
+
         lay.addWidget(acard)
+
+    def _read_version_text(self) -> str:
+        """读仓库根 VERSION，拼上 atrium 版本（读不到就只显示主版本）。"""
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.dirname(os.path.dirname(here))
+        ver = ""
+        try:
+            with open(os.path.join(root, "VERSION"), encoding="utf-8") as f:
+                ver = f.read().strip()
+        except OSError:
+            ver = "?"
+        return f"dsh-bridge {ver}"
+
+    def _check_updates(self) -> None:
+        """真的去 GitHub 查一下有没有新版本。
+
+        ⚠️ 原来这里只弹一句"当前已是本地最新版本"—— 什么都不查。
+            用户点一百次都是这句话，等于骗人。
+
+        ⚠️ 查的时候走后台线程。
+            urlopen 最慢能卡十几秒，放在主线程里界面会整个冻住。
+
+        ⚠️ 查不到**不要说"已是最新"**。
+            网络断了 / 被墙了 / 仓库没发 Release —— 这些都查不到，
+            但跟"确实是最新"是两回事。分开说。
+        """
+        import threading
+
+        from PySide6.QtWidgets import QMessageBox
+
+        # ⚠️ 别用 QMetaObject.invokeMethod 送 lambda。
+        #
+        #    它只接受「成员方法名字符串」，不接受 Python 函数：
+        #        TypeError: invokeMethod(MainWindow, function, ConnectionType)
+        #                called with wrong argument types
+        #
+        #    （2026-11-05 点「检查更新」直接炸，就是写错在这个。）
+        #
+        #    后台线程要回主线程改界面，最稳的是**自定义信号**。
+        REPO = "sxm991104/remote-dispatch"
+        cur = self._read_version_num()
+
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("检查中…")
+
+        def finish(payload) -> None:
+            title, msg = payload
+            try:
+                self.btn_check_update.setEnabled(True)
+                self.btn_check_update.setText("检查更新")
+            except Exception:  # noqa: BLE001
+                pass
+            QMessageBox.information(self, title, msg)
+
+        # 后台线程不能直接调 finish（碰界面会崩），
+        # 排进主线程队列，由 _drain_main_queue 执行。
+        def post(payload):
+            q = getattr(self, "_main_queue", None)
+            if q is None:
+                return
+            q.append(lambda: finish(payload))
+
+        def work() -> None:
+            import json
+            import urllib.request
+
+            try:
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{REPO}/releases/latest",
+                    headers={"User-Agent": "dsh-bridge-updater"},
+                )
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    d = json.loads(r.read().decode("utf-8"))
+            except Exception as e:  # noqa: BLE001
+                post((
+                    "检查更新",
+                    f"没查到版本信息（{type(e).__name__}）。\n\n"
+                    "可能是网络不通，或者仓库还没发过 Release。\n"
+                    f"当前版本：{cur}",
+                ))
+                return
+
+            tag = str(d.get("tag_name") or "").lstrip("vV")
+            url = str(d.get("html_url") or "")
+
+            if not tag:
+                post(
+                    ("检查更新", f"接口没给版本号。当前版本：{cur}")
+                )
+                return
+
+            newer = _ver_gt(tag, cur)
+            post((
+                "检查更新",
+                (f"有新版本：{tag}\n当前：{cur}\n\n{url}"
+                 if newer else
+                 f"已经是最新的。\n当前：{cur}\n最新：{tag}"),
+            ))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _read_version_num(self) -> str:
+        """只读版本号本身（不带 "dsh-bridge " 前缀）。"""
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.dirname(os.path.dirname(here))
+        try:
+            with open(os.path.join(root, "VERSION"), encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
 
 
     def _card_paths(self, lay: QVBoxLayout) -> None:
@@ -212,34 +366,88 @@ class SettingsMiscMixin:
         """问一下现在是不是开机自启，刷新开关外观。"""
         def done(data):
             on = bool((data or {}).get("enabled"))
-            self.switch_auto.setChecked(on)
-            self.switch_auto.setObjectName("switchon" if on else "switchoff")
-            self.switch_auto.setText("开机自启 · 开" if on else "开机自启 · 关")
-            # objectName 变了要重新套一遍样式
-            self.switch_auto.style().unpolish(self.switch_auto)
-            self.switch_auto.style().polish(self.switch_auto)
+            # ⚠️ 记下"真实状态"。_toggle_autostart 以它为基准取反 ——
+            #    不能读按钮的 isChecked()，那个在点击瞬间已经被 Qt 翻过了。
+            self._auto_current = on
+            self._apply_autostart_view(on)
 
         self.api.request_once("/api/autostart", callback=done)
 
     def _toggle_autostart(self) -> None:
-        """点了开关：按当前状态翻转。
+        """点了开关：按**点之前**的状态取反。
 
-        ⚠️ 光靠 clicked 信号的默认行为不可靠：
-            按钮是可 checkable 的，Qt 会自己翻转一次，
-            如果这里再翻转一次就会来回抵消。
-            所以统一以"服务端现在是什么状态"为准，取了再设成相反值。
+        ⚠️ 这里原来写的是 `want = not self.switch_auto.isChecked()`，
+            但那个按钮是 setCheckable(True) 的 —— 点下去的一瞬间
+            Qt 已经把勾选状态翻转了，所以 isChecked() 读到的**已经是新值**。
+            再取一次反，等于设成了"用户想要的反面"。
+
+            表现：想开 → 传了关；想关 → 传了开。
+            服务端老实照着做，然后 _refresh_autostart() 一刷新，
+            按钮又弹回原样 —— 用户看到的就是"点了没反应"。
+
+            实测（2026-11-05）：老爸点了半天，一直显示开着，实际也没生效。
+
+        ⚠️ 现在用 sender() 拿点击前的状态？Qt 里没有这个接口。
+            可靠的做法是**以服务端当前状态为准**：
+            点之前先记下来，用 self._auto_current（_refresh 时同步好的）。
         """
-        want = not self.switch_auto.isChecked()
+        # 以「刷新时记下的真实状态」为基准，不读按钮的勾选状态
+        cur = bool(getattr(self, "_auto_current", False))
+        want = not cur
+
+        # 按钮立刻反映用户的意图（等服务端回来再校正）
+        self.switch_auto.setChecked(want)
 
         def done(data):
-            ok = bool((data or {}).get("ok"))
-            if not ok:
-                self.lbl_auto.setText((data or {}).get("error") or "设置失败")
+            # ⚠️ 这一整段都要防"控件已经被销毁"。
+            #
+            #    页面是懒建的，而且这个回调是**跨线程排队**回来的 ——
+            #    排队期间用户可能已经切走、页面被回收。
+            #    这时候碰 self.lbl_auto 直接 AttributeError，
+            #    异常在 Qt 信号回调里吞掉，表现就是"回调跑了但界面没变"。
+            #
+            #    实测（2026-11-05）：点开关，磁盘上的 lnk 真删掉了，
+            #    界面还写着"开机自启 · 开"—— 就是死在这。
+            try:
+                ok = bool((data or {}).get("ok"))
+                lbl = getattr(self, "lbl_auto", None)
+                if lbl is not None:
+                    if not ok:
+                        lbl.setText((data or {}).get("error") or "设置失败")
+                    else:
+                        lbl.setText((data or {}).get("note") or "")
+            except Exception:  # noqa: BLE001
+                pass
+
+            # 用**这次返回里的 enabled** 直接定状态，不要再发一次查询。
+            #
+            # 原来这里调 _refresh_autostart() —— 又发一个同路径的请求。
+            # 而 Api 层对同一路径有"去重"：新请求可能被判定成重复
+            # 直接丢弃，回调永远不回来。
+            if "enabled" in (data or {}):
+                self._auto_current = bool(data["enabled"])
+                self._apply_autostart_view(self._auto_current)
             else:
-                self.lbl_auto.setText((data or {}).get("note") or "")
-            self._refresh_autostart()
+                self._refresh_autostart()
 
         self.api.request_once("/api/autostart", {"on": want}, callback=done)
+
+    def _apply_autostart_view(self, on: bool) -> None:
+        """把开关画成这个状态（不发请求）。
+
+        ⚠️ 控件可能不存在（页面还没建 / 已经被回收），所以全用 getattr。
+        """
+        try:
+            sw = getattr(self, "switch_auto", None)
+            if sw is None:
+                return
+            sw.setChecked(on)
+            sw.setObjectName("switchon" if on else "switchoff")
+            sw.setText("开机自启 · 开" if on else "开机自启 · 关")
+            sw.style().unpolish(sw)
+            sw.style().polish(sw)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _load_model(self) -> None:
         self.api.get("/api/model")

@@ -551,6 +551,38 @@ def check(task: str) -> dict:
     now = time.time()
     any_pending = any(p.expires >= now for p in _state.pending.values())
 
+    # ⚠️ **外传和审计员的码也算"任务端锁着"。**
+    #
+    #    老爸的原话：「都要锁死宝贝」
+    #
+    #    原来这里只看自己的 pending —— 也就是危险操作/提权那一套。
+    #    外传（netauth）和审计员（auditor_code）各有各的码，
+    #    它们发码的时候，任务端**照样能派活**。
+    #
+    #    实测（2026-11-05）：
+    #        外传发码后    → allow=True，任务端还能派活
+    #        审计员发码后  → allow=True，任务端还能派活
+    #
+    #    这不合理：一条码没过，说明"有人在做需要确认的事"，
+    #    这时候不该再往机器上堆新活。
+    #
+    #    所以三条路的 pending 统一算进来。
+    _other_pending = False
+    try:
+        from guard import netauth as _na
+
+        _other_pending = _other_pending or _na.has_pending()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from guard import auditor_state as _ast
+
+        _other_pending = _other_pending or _ast.is_asking()
+    except Exception:  # noqa: BLE001
+        pass
+
+    any_pending = any_pending or _other_pending
+
     # 清理到期自动解开的锁
     for fp in list(_locked.keys()):
         if _locked[fp] <= now:
@@ -830,6 +862,30 @@ def send_code_email(task: str, purpose: str = "",
     elif not is_guard_ready():
         return False, "还没配安全邮箱"
 
+    # ── 静默期间：不发码，直接当"已通过" ──
+    #
+    # ⚠️ 这是**用户自己用邮箱码换来的**一段免打扰时间，不是绕过。
+    #
+    #    流程：用户验过码 → 说"关到五点" → quiet.start()
+    #    之后这段时间里，动作守卫 / 提权 / 危险操作都不再弹码。
+    #
+    #    到点自动失效（quiet.until() 过期就返回 0），
+    #    什么都不用做，验证自然恢复。
+    #
+    #    为什么放在这一层（send_code_email 的开头）：
+    #        危险操作、提权、动作守卫拦截、解锁 —— 四条路
+    #        最终都走这个函数。在这里判一次就全覆盖了。
+    try:
+        from guard import quiet as _q
+
+        if _q.is_quiet():
+            return True, (
+                f"现在是静默期（还有 {_q.remaining() // 60} 分钟），"
+                "这一步不用验证码，直接放行。"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     fp = _fingerprint(task)
 
     # 强制锁期间不许重新发码
@@ -914,6 +970,26 @@ def send_code_email(task: str, purpose: str = "",
         try:
             if c.get("smtp_user") and c.get("smtp_pass"):
                 server.login(c["smtp_user"], c["smtp_pass"])
+
+            # ⚠️ 真发出去之前的**最后一道**静默判断。
+            #
+            #    函数开头判过一次，但那之后中间隔了
+            #    生成码、写 pending、建 MIME、连 SMTP ——
+            #    这段时间（尤其连服务器那几秒）用户有可能刚好开了静默。
+            #
+            #    判在这里，才是"信真的没发出去"。
+            try:
+                from guard import quiet as _q2
+
+                if _q2.is_quiet():
+                    _state.pending.pop(fp, None)
+                    return True, (
+                        f"现在是静默期（还有 {_q2.remaining() // 60} 分钟），"
+                        "验证码没发。"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
             server.sendmail(
                 msg["From"], [c["email"]], msg.as_string()
             )

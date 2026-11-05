@@ -1,4 +1,4 @@
-"""配置目录：各平台该放哪儿，以及两份实现必须一致。
+"""配置目录：各平台该放哪儿。
 
 ⚠️ 背景
 
@@ -17,64 +17,22 @@
 
     现在统一成 tools/userdirs.py。
 
-    ⚠️ 但插件（plugins/）不能 import 它 ——
-        插件被 AstrBot 加载，AstrBot 只把插件目录加进 sys.path，
-        不会把我们仓库根加进去。
+⚠️ 2026-11-05：原来还有一条 test_plugin_and_core_agree，
+    验「插件 plugins/_dsh_paths.py 和 core/tools/userdirs 给出同一个目录」。
+    插件已经整个删了（前台搬去 atrium，AstrBot 那条路不要了），
+    plugins/ 目录不存在 → 这条用例永远 FileNotFoundError → 永远失败。
 
-        所以插件那边单独写了 plugins/_dsh_paths.py。
-
-        两份代码，必须给出一样的结果。下面第一条测试就是查这个。
+    更坑的是：它不在 run_all.py 的 modules 清单里，全量跑根本不跑它，
+    于是这个红了很久没人知道。现在用例删了，文件本身加进 run_all，
+    剩下几条平台路径测试以后真会被跑到。
 """
 
-import importlib.util
 import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-
-
-def _load_plugin_paths():
-    """把 plugins/_dsh_paths.py 当作独立模块加载（模拟 AstrBot 的加载方式）。"""
-    p = os.path.join(ROOT, "plugins", "_dsh_paths.py")
-    spec = importlib.util.spec_from_file_location("_plugin_dsh_paths", p)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
-def test_plugin_and_core_agree(monkeypatch):
-    """插件的 _dsh_paths 和项目的 tools.userdirs 给出同一个目录。
-
-    这两份是**重复实现**（没法共享），很容易改一边忘一边。
-    这条测试就是那条"别忘了"的绳子。
-    """
-    from tools import userdirs
-
-    pp = _load_plugin_paths()
-
-    # 在几种环境组合下都比一遍
-    cases = [
-        {"APPDATA": r"C:\Users\x\AppData\Roaming"},
-        {"XDG_CONFIG_HOME": "/home/x/.config"},
-        {"XDG_CONFIG_HOME": ""},
-        {},
-    ]
-    for case in cases:
-        for k in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"):
-            if k in case:
-                monkeypatch.setenv(k, case[k])
-            else:
-                monkeypatch.delenv(k, raising=False)
-
-        a = userdirs.config_dir()
-        b = pp.config_dir()
-        assert os.path.normcase(a) == os.path.normcase(b), (
-            f"环境 {case} 下两份实现不一致：\n"
-            f"  tools/userdirs   → {a}\n"
-            f"  plugins/_dsh_paths → {b}"
-        )
 
 
 def test_windows_uses_appdata(monkeypatch):
@@ -149,7 +107,6 @@ def test_no_appdata_fallback_to_home_root():
     # 这两个文件自己就是在处理这件事，跳过
     SKIP = {
         os.path.join("tools", "userdirs.py"),
-        os.path.join("plugins", "_dsh_paths.py"),
     }
 
     for dp, dns, fns in os.walk(ROOT):

@@ -90,6 +90,15 @@ def ensure_code() -> tuple[str, bool]:
 
         所以：10 分钟内已经发过一个有效的，就复用它。
     """
+    # ⚠️ 静默期间不生成码。
+    try:
+        from guard import quiet as _q
+
+        if _q.is_quiet():
+            return "", False
+    except Exception:  # noqa: BLE001
+        pass
+
     d = _load()
     code = str(d.get("code") or "")
     expires = float(d.get("expires") or 0)

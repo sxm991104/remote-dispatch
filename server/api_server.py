@@ -107,6 +107,57 @@ except Exception:  # noqa: BLE001
 DEFAULT_PORT = 8790
 
 
+def _auditor_key_for(base: str) -> str:
+    """这个地址是不是审计员配的那个？是就返回它的 Key。
+
+    ## ⚠️ 为什么需要这个
+
+        审计员的 Key 存起来之后，界面上**不回填**（防复制），
+        只留一句"已保存 · 尾号 xxx"。
+
+        于是用户点「测试连接」时，界面上传过来的 body 里
+        根本没有 api_key —— 只知道地址和模型名。
+
+        这时候如果直接去 _profile_creds() 找，
+        拿到的是**任务端模型**的 Key。
+        拿 DeepSeek 的 Key 去连硅基流动，必然 401。
+
+        （实测 2026-11-05：老爸说"填写测试是通了，
+          但是保存后再测试，返回 401"——就是这个。）
+
+    ## 怎么认
+
+        比 base_url 的**主机名**（忽略路径和末尾斜杠）。
+            填 "https://api.siliconflow.cn"  存 "https://api.siliconflow.cn/v1"
+            → 是同一个服务，用审计员的 Key
+
+        主机不一样就不碰 —— 用户可能是在测任务端那套模型。
+    """
+    from urllib.parse import urlparse
+
+    def host(u: str) -> str:
+        try:
+            h = urlparse(str(u or "").strip()).netloc.lower()
+            return h.split(":")[0]
+        except Exception:  # noqa: BLE001
+            return ""
+
+    want = host(base)
+    if not want:
+        return ""
+
+    try:
+        from guard import auditor as _aud
+
+        cfg = _aud.load() or {}
+        if host(cfg.get("base_url") or "") == want:
+            return str(cfg.get("api_key") or "").strip()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return ""
+
+
 def _profile_creds(pid: str, base: str = "") -> tuple[str, str]:
     """从多套配置里取一套的 (base_url, api_key)。
 
@@ -233,33 +284,256 @@ def _listening_pids(port: int) -> list[str]:
 def https_status() -> dict:
     """服务状态，给界面显示。
 
-    ## ⚠️ 这一块原来查的是 AstrBot 和 NapCat
+    ## 每一项都**真去查**，不许写死
 
-        以前：
-            qq       看 NapCat 的 3000 端口 + AstrBot 的 6185
-            feishu   看 AstrBot 里 lark 平台连没连上
-            bridge   恒为 True
+        原来这里是：
 
-        现在那两套都没了：
-            QQ       不支持了（NapCat 那条路删了）
-            飞书     接平台归 atrium，不归这个仓库
+            return {"qq": False, "feishu": False, "bridge": True}
 
-        所以只剩一项真状态：**这个仓库自己的服务通没通**。
+        三个值全是常量。于是：
+            · 顶栏「飞书」永远是红的 —— 哪怕 atrium 正跑着
+            · 「任务端」永远是绿的 —— 哪怕这个服务眼看要挂
+            · 用户在右上角看到的状态，跟实际情况一点关系都没有
 
-    ## ⚠️ 为什么还留着 qq / feishu 两个键
+        （2026-11-05 老爸截图里问「为啥只有飞书一直红」，才发现。）
 
-        界面那三个灯是按这两个键取值的。
-        直接删掉会让界面拿到 None，判成"没开"，全变红。
+    ## 现在怎么查
 
-        留着键、值恒为 False，意思是"这儿没在管这条通道"——
-        比删掉安全。
+        飞书 / 钉钉   看 atrium 的心跳文件（~/.atrium/alive.json）
+                      它每 10 秒写一次，超过 60 秒没写就当没跑
+
+        任务端        这里能跑进来就说明它在（否则你看到的就是错误页）
+
+    ## ⚠️ 为什么还留着 "qq" 这个键
+
+        界面按这几个键取值的，删掉会让界面拿到 None。
+        QQ 现在不支持了，恒为 False，但键留着。
     """
-    # 能跑进来就说明这个服务活着
-    return {
-        "qq": False,
-        "feishu": False,
-        "bridge": True,
-    }
+    import json as _json
+    import os as _os
+    import time as _t
+
+    out = {"qq": False, "feishu": False, "dingtalk": False, "bridge": True}
+
+    # ── atrium 心跳 ──
+    #
+    # ⚠️ 心跳超过 60 秒没更新就当没跑。
+    #    atrium 那边每 10 秒写一次，60 秒是 6 个周期，够宽容了。
+    p = _os.path.join(_os.path.expanduser("~"), ".atrium", "alive.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = _json.load(f)
+        age = _t.time() - float(d.get("ts") or 0)
+        alive = age < 60
+    except (OSError, _json.JSONDecodeError, TypeError, ValueError):
+        alive = False
+
+    if alive:
+        # atrium 活着，再看它配了哪几个平台
+        #
+        # 只看"配了没"，不看"连上没" ——
+        # 连上没要问 atrium 自己，跨进程问不到，而且心跳活着
+        # 本身就是"它在跑"的证据。
+        try:
+            cfgp = _os.path.join(_os.path.expanduser("~"), ".atrium", "config.json")
+            with open(cfgp, encoding="utf-8") as f:
+                ac = _json.load(f)
+            plats = ac.get("platforms") or {}
+            if isinstance(plats, dict):
+                fs = plats.get("feishu") or {}
+                dt = plats.get("dingtalk") or {}
+                out["feishu"] = bool(
+                    isinstance(fs, dict) and fs.get("app_id")
+                    and fs.get("enabled") is not False
+                )
+                out["dingtalk"] = bool(
+                    isinstance(dt, dict) and dt.get("client_id")
+                    and dt.get("enabled") is not False
+                )
+        except (OSError, _json.JSONDecodeError):
+            pass
+
+    return out
+
+
+def _run_diagnose() -> dict:
+    """跑一轮自检，返回结构化报告。前端只管画。"""
+    checks: list[dict] = []
+
+    # 1. 引擎服务（这个 HTTP 服务本身）
+    checks.append({
+        "id": "engine.self",
+        "label": "桥服务",
+        "ok": True,
+        "detail": "桥服务活着，能收到请求",
+        "fix": "",
+    })
+
+    # 2. 任务端模型配置
+    try:
+        from core import engine_bridge
+        cfg = engine_bridge.load_config()
+        has_key = bool(cfg.get("api_key"))
+        model = cfg.get("model") or ""
+        base = cfg.get("base_url") or ""
+        if has_key and model and base:
+            checks.append({
+                "id": "engine.model",
+                "label": "任务端模型",
+                "ok": True,
+                "detail": f"{model} @ {base}",
+                "fix": "",
+            })
+        else:
+            missing = []
+            if not base: missing.append("接口地址")
+            if not model: missing.append("模型名")
+            if not has_key: missing.append("API Key")
+            checks.append({
+                "id": "engine.model",
+                "label": "任务端模型",
+                "ok": False,
+                "detail": "缺：" + "、".join(missing),
+                "fix": "去「模型」页填接口地址、模型名和 Key",
+            })
+    except Exception as e:  # noqa: BLE001
+        checks.append({
+            "id": "engine.model",
+            "label": "任务端模型",
+            "ok": False,
+            "detail": f"读配置失败：{e}",
+            "fix": "去「模型」页重新配置",
+        })
+
+    # 3. atrium 配置
+    #
+    # ⚠️ 路径在**用户主目录**下：~/.atrium/config.json
+    #
+    #    原来拼的是 %APPDATA%\.atrium\config.json ——
+    #    那是 C:\Users\xxx\AppData\Roaming\.atrium\，
+    #    而 atrium 实际写在 C:\Users\xxx\.atrium\。
+    #
+    #    差了一层目录，永远读不到，于是诊断永远报
+    #    "飞书和钉钉都没填" —— 用户明明配好了。
+    #
+    #    实测（2026-11-05）：真开窗口点「诊断」看到的。
+    #
+    #    现在两个位置都找一遍（老版本可能真的装到过 APPDATA 下），
+    #    找到哪个用哪个。
+    import json as _json_mod
+
+    _atrium_cands = [
+        # 现在的位置：用户主目录
+        os.path.join(os.path.expanduser("~"), ".atrium", "config.json"),
+        # 兜底：万一有人的装到了 APPDATA 下
+        os.path.join(os.environ.get("APPDATA", ""), ".atrium", "config.json"),
+    ]
+    atrium_cfg = ""
+    for _c in _atrium_cands:
+        if _c and os.path.exists(_c):
+            atrium_cfg = _c
+            break
+    if not atrium_cfg:
+        atrium_cfg = _atrium_cands[0]
+
+    try:
+        with open(atrium_cfg, encoding="utf-8") as f:
+            acfg = _json_mod.load(f)
+
+        # ⚠️ 平台配置在 acfg["platforms"]["feishu"]，不是 acfg["feishu"]。
+        #
+        #    atrium 的 config.json 结构是：
+        #        engine / storage / platforms{feishu{...}, dingtalk{...}}
+        #
+        #    原来直接读 acfg["feishu"]，那层压根不存在，
+        #    所以就算路径对了也会判成"没填"。
+        _plats = acfg.get("platforms") or {}
+        for _k, _v in _plats.items() if isinstance(_plats, dict) else []:
+            if not isinstance(_v, dict):
+                continue
+            if _v.get("enabled") is False:
+                continue
+        feishu = bool(
+            ((_plats.get("feishu") or {}).get("app_id")
+             if isinstance(_plats, dict) else False)
+        )
+        dingtalk = bool(
+            ((_plats.get("dingtalk") or {}).get("client_id")
+             if isinstance(_plats, dict) else False)
+        )
+        if feishu or dingtalk:
+            chans = []
+            if feishu:
+                chans.append("飞书")
+            if dingtalk:
+                chans.append("钉钉")
+            checks.append({
+                "id": "atrium.config",
+                "label": "atrium 通道",
+                "ok": True,
+                "detail": "已配：" + "、".join(chans),
+                "fix": "",
+            })
+        else:
+            checks.append({
+                "id": "atrium.config",
+                "label": "atrium 通道",
+                "ok": False,
+                "detail": f"配置里没有可用的平台（{atrium_cfg}）",
+                "fix": "去「通道」页填飞书或钉钉凭据",
+            })
+    except FileNotFoundError:
+        checks.append({
+            "id": "atrium.config",
+            "label": "atrium 通道",
+            "ok": False,
+            "detail": f"找不到配置 {atrium_cfg}",
+            "fix": "在 atrium 目录跑 python -m atrium.cli init 生成配置",
+        })
+    except Exception as e:  # noqa: BLE001
+        checks.append({
+            "id": "atrium.config",
+            "label": "atrium 通道",
+            "ok": False,
+            "detail": f"读配置失败：{e}",
+            "fix": "去「通道」页检查配置",
+        })
+
+
+    # 4. 任务锁（有没有卡死的任务）
+    try:
+        state_dir = os.path.join(BRIDGE_DIR, "state")
+        locks = []
+        if os.path.isdir(state_dir):
+            for name in os.listdir(state_dir):
+                if name.endswith(".lock"):
+                    locks.append(name)
+        if not locks:
+            checks.append({
+                "id": "engine.locks",
+                "label": "卡死任务锁",
+                "ok": True,
+                "detail": "没有残留锁",
+                "fix": "",
+            })
+        else:
+            checks.append({
+                "id": "engine.locks",
+                "label": "卡死任务锁",
+                "ok": False,
+                "detail": f"{len(locks)} 个锁文件残留：{', '.join(locks[:3])}",
+                "fix": "重启桥服务会清掉；或手动删 state/ 下的 .lock",
+            })
+    except Exception as e:  # noqa: BLE001
+        checks.append({
+            "id": "engine.locks",
+            "label": "卡死任务锁",
+            "ok": True,
+            "detail": f"检查跳过：{e}",
+            "fix": "",
+        })
+
+    return {"ok": True, "checks": checks}
 
 
 # 本机接口的访问 token。main() 启动时生成/读取，_guard() 用它校验。
@@ -460,6 +734,9 @@ class Handler(BaseHTTPRequestHandler):
             st, b = _json({"ok": True, "time": datetime.now().isoformat(timespec="seconds")})
             return self._send(st, b)
 
+        if path == "/api/diagnose":
+            return self._send(*_json(_run_diagnose()))
+
         if path == "/api/tasks":
             return self._tasks()
 
@@ -528,6 +805,17 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/auditor":
             # 安全审核员。跟主模型分开的两套配置。
+            #
+            # ⚠️ **api_key 不能原样吐出去。**
+            #
+            #    原来直接 _json(cfg)，把明文 key 回给了调用方。
+            #    界面那边就算显示成圆圈，Ctrl+A / Ctrl+C 也能复制出完整 key。
+            #    （实测 2026-11-05：老爸当场复现，"这是很严重的明文 bug"。）
+            #
+            #    现在跟 /api/engine/profiles 一个做法：
+            #        api_key  换成 has_key（有没有）
+            #        key_tail 只回尾号四位
+            #    前端拿尾号显示"已保存 · 尾号 xxxx"，永远拿不到完整值。
             try:
                 from guard import auditor as _aud
 
@@ -535,6 +823,12 @@ class Handler(BaseHTTPRequestHandler):
                 ok, why = _aud.is_ready(cfg)
                 cfg["_ready"] = ok
                 cfg["_why"] = why
+
+                _k = str(cfg.get("api_key") or "")
+                cfg["has_key"] = bool(_k)
+                cfg["key_tail"] = _k[-4:] if len(_k) > 4 else ""
+                cfg.pop("api_key", None)
+
                 return self._send(*_json(cfg))
             except Exception as e:  # noqa: BLE001
                 return self._send(*_json({"error": str(e)}, 500))
@@ -549,10 +843,40 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
         if path == "/api/guard":
+            # 验证码邮箱的配置。
+            #
+            # ⚠️ **明文地址只给桌面端，不给前台。**
+            #
+            #    原来不分青红皂白返回 email / smtp_user 完整值，
+            #    而调用这个接口的还有前台 Agent（模型）。
+            #
+            #    前台是"收码的柜员"，不是"管邮箱的人"：
+            #        它只该知道「要码了」「你配了吗」，
+            #        不该知道邮箱是哪个、服务器是哪台。
+            #
+            #    一旦它知道了，那些字就会回到对话里 ——
+            #    被截图、被翻记录，等于把撞密码的目标送出去。
+            #
+            #    所以：
+            #        带 X-Client: desktop 头 → 给全（本机设置页要填要改）
+            #        否则（前台 / 任何别的调用方）→ 只给"配好没"
             try:
                 from guard import guard
 
                 c = guard.load_config()
+                ready = guard.is_guard_ready()
+
+                # 只有本机桌面端才给明细
+                who = (self.headers.get("X-Client") or "").strip().lower()
+                if who != "desktop":
+                    return self._send(*_json({
+                        "ok": True,
+                        "enabled": bool(c.get("enabled")),
+                        "ready": ready,
+                        # 够前台判断"能不能发码"了，多的一个字不给
+                        "has_email": bool(c.get("email")),
+                    }))
+
                 return self._send(*_json({
                     "ok": True,
                     "enabled": c.get("enabled"),
@@ -562,7 +886,7 @@ class Handler(BaseHTTPRequestHandler):
                     "smtp_port": c.get("smtp_port") or 465,
                     "smtp_user": c.get("smtp_user") or "",
                     "has_pass": bool(c.get("smtp_pass")),
-                    "ready": guard.is_guard_ready(),
+                    "ready": ready,
                 }))
             except Exception as e:  # noqa: BLE001
                 return self._send(*_json({"ok": False, "error": str(e)}, 500))
@@ -596,9 +920,56 @@ class Handler(BaseHTTPRequestHandler):
             #
             # ⚠️ 改模式在 do_POST 里，这里只读 ——
             #    GET 没有 body，走不了 set_mode。
+            #
+            # ## ⚠️ 但这里会**自动修正**一次
+            #
+            #     老爸的原话（2026-11-05）：
+            #         「你要检测用户有没有回退嘛，有的话就给他打到有的。」
+            #
+            #     场景：用户本来开着「严格防护」，后来把邮箱关了。
+            #         严格防护每拦一次都要发码，码发不出去 → 人卡死。
+            #
+            #     原来只是把按钮灰掉 —— 等于把问题丢给用户，
+            #     而他可能根本不知道为什么。
+            #
+            #     现在：读状态的时候顺手判一下，
+            #         当前模式用不了就**自动换到一个还能用的**，
+            #         并在返回里带一句 why_changed 说明发生了什么。
+            #
+            #     ⚠️ 只降不升：换到的是"能用的里面保护最强的那个"，
+            #        不会因为某次探测抖一下就把用户升到严格防护去
+            #        （那会突然开始疯狂要码，更烦人）。
             from guard import security_mode as _sm
 
-            return self._send(*_json(_sm.status()))
+            st = _sm.status()
+            try:
+                from guard import capabilities as _cap
+
+                caps = _cap.capabilities()
+                cur = str(st.get("mode") or "")
+                modes = caps.get("modes") or {}
+
+                if cur and not (modes.get(cur) or {}).get("ok"):
+                    pick = _cap.pick_usable(cur, caps)
+                    if pick and pick != cur:
+                        _sm.set_mode(pick)
+                        st = _sm.status()
+                        st["changed_from"] = cur
+                        st["why_changed"] = _cap.explain_fallback(cur, pick, caps)
+                    elif not pick:
+                        # 一个都开不了 —— 不强行改，但告诉用户
+                        st["no_usable_mode"] = True
+                        st["why_changed"] = (
+                            "现在一个安全模式都开不了：验证码邮箱和系统卷影副本都不具备。"
+                            "去配一样就能选了。"
+                        )
+
+                st["capabilities"] = caps
+            except Exception as e:  # noqa: BLE001
+                # 查能力失败不能把"看状态"这个接口搞挂
+                st["capabilities_error"] = f"{type(e).__name__}: {e}"
+
+            return self._send(*_json(st))
 
         if path == "/api/net/status":
                 # 看现在有没有联网授权、还剩多久。只读。
@@ -774,6 +1145,27 @@ class Handler(BaseHTTPRequestHandler):
                 "remaining": max(0, int(until - _t.time())),
             }))
 
+        if path == "/api/net/code":
+            # 发联网授权验证码到邮箱。
+            #
+            # ⚠️ 原来 netauth.send_code() 写好了却没挂路由 ——
+            #    桌面端点"申请联网授权"没东西可调，只能干瞪眼。
+            #    这里复用它：10 分钟内已发过就复用，不重复打扰。
+            from guard import netauth as _na
+
+            ok, msg = _na.send_code()
+            return self._send(*_json({"ok": ok, "message": msg}, 200 if ok else 502))
+
+        if path == "/api/net/revoke":
+            # 提前收回联网授权。
+            #
+            # ⚠️ netpolicy.revoke() 一直有函数没挂路由 ——
+            #    放行后想提前关掉，界面上没按钮可点。
+            from guard import netpolicy as _np
+
+            _np.revoke("用户在桌面端提前收回联网")
+            return self._send(*_json({"ok": True, "message": "已收回联网授权"}))
+
 
 
         if path == "/api/auditor/status":
@@ -798,10 +1190,174 @@ class Handler(BaseHTTPRequestHandler):
 
 
         if path == "/api/security/mode":
-            # 安全模式。只读。
+            # 改安全模式。
+            #
+            # ⚠️ 这一段原来是**只读**的 —— 里面只有一句
+            #        return self._send(*_json(_sm.status()))
+            #
+            #    前端点「出事可回退」→ POST 过来 → 服务端只回了一份状态，
+            #    **压根没调 set_mode**。所以模式永远停在原来那个。
+            #    前端拿到 ok=True 还挺高兴，界面也不报错。
+            #
+            #    实测（2026-11-05）：老爸点「出事可回退」，
+            #    磁盘上 security_mode.json 里还是 "strict"。
+            #
+            #    注释里原来写的是「安全模式。只读。改模式在 do_POST 里」——
+            #    结果这段**就在 do_POST 里**，却是只读的。
             from guard import security_mode as _sm
 
-            return self._send(*_json(_sm.status()))
+            mode = self._str_field(body, "mode").strip().lower()
+            if not mode:
+                # 没说要改哪个，那就是来读状态的
+                return self._send(*_json(_sm.status()))
+
+            # ── 能力检查：做不到的模式不许切 ──
+            #
+            # ⚠️ 桌面端那边已经拦了一道（按钮 disabled + 点之前查），
+            #    但那是界面层 —— 任何直接打这个接口的调用方都绕得过。
+            #
+            #    老爸的原话（2026-11-05）：
+            #        「如果都没有设置，就给提示，都开不了，
+            #          只有配置了才能开。」
+            #
+            #    所以服务端必须自己再判一次。三层都拦：
+            #        界面禁用 → 点之前查 → **服务端再查**
+            try:
+                from guard import capabilities as _cap
+
+                caps = _cap.capabilities()
+                modes = caps.get("modes") or {}
+
+                # 先看模式本身认不认识 —— 不认识的模式给"不认识"，
+                # 不要误报成"现在开不了"（那是两回事，用户会照错的话去配）。
+                if mode not in modes:
+                    return self._send(*_json({
+                        "ok": False,
+                        "error": f"不认识的模式：{mode}",
+                    }, 400))
+
+                info = modes.get(mode) or {}
+                if not info.get("ok"):
+                    return self._send(*_json({
+                        "ok": False,
+                        "error": info.get("why") or "这个模式现在开不了",
+                        "capabilities": caps,
+                    }, 400))
+            except Exception as e:  # noqa: BLE001
+                # 查能力失败 —— 不放行。
+                # 跟别处"守卫挂了不等于安全"一个方向。
+                return self._send(*_json({
+                    "ok": False,
+                    "error": f"判断不了能不能开这个模式（{type(e).__name__}），先不给你切。",
+                }, 500))
+
+            try:
+                _sm.set_mode(mode)
+            except Exception as e:  # noqa: BLE001
+                return self._send(*_json({
+                    "ok": False,
+                    "error": f"不认识的模式：{mode}（{type(e).__name__}）",
+                }, 400))
+
+            st = _sm.status()
+            st["ok"] = True
+            return self._send(*_json(st))
+
+        if path == "/api/security/mode/verified":
+            # 切安全模式 —— **要验证码的那个版本**。
+            #
+            # ## ⚠️ 为什么要单独一个入口，不直接给 /api/security/mode 加码
+            #
+            #     桌面端那边是**用户坐在电脑前点**的 ——
+            #     他自己看着屏幕，不需要再发个码到自己邮箱。
+            #     每次切模式都逼他收码，那是折磨。
+            #
+            #     而这个入口是**给 atrium 前台用的** ——
+            #     消息从飞书/钉钉进来，可能是别人借手机发的。
+            #     所以前台一刀切：**切模型就要码。**
+            #
+            #     （2026-11-05 老爸定的：
+            #        「要那个码，到前台了都要码宝贝，
+            #          因为前台是暴露在外的，桌面端是用户电脑。」）
+            #
+            # ## 流程
+            #
+            #     不带 code  → 发码，回 need_code=True
+            #     带 code    → 校验，通过就切
+            #
+            #     跟 /api/perms 那套是同一个模式（见 2150 行附近），
+            #     连 purpose 的拼法都保持一致，省得两套码互相打架。
+            from guard import security_mode as _sm2
+
+            mode = self._str_field(body, "mode").strip().lower()
+            code = self._str_field(body, "code").strip()
+
+            if not mode:
+                st = _sm2.status()
+                st["ok"] = True
+                return self._send(*_json(st))
+
+            # 能力检查（跟上面那条一样）
+            try:
+                from guard import capabilities as _cap
+
+                caps = _cap.capabilities()
+                modes = caps.get("modes") or {}
+                if mode not in modes:
+                    return self._send(*_json({
+                        "ok": False, "error": f"不认识的模式：{mode}",
+                    }, 400))
+                info = modes.get(mode) or {}
+                if not info.get("ok"):
+                    return self._send(*_json({
+                        "ok": False,
+                        "error": info.get("why") or "这个模式现在开不了",
+                        "capabilities": caps,
+                    }, 400))
+            except Exception as e:  # noqa: BLE001
+                return self._send(*_json({
+                    "ok": False,
+                    "error": f"判断不了能不能开这个模式（{type(e).__name__}），先不给你切。",
+                }, 500))
+
+            purpose = f"security:{mode}"
+
+            try:
+                from guard import guard as _g
+            except ImportError:
+                return self._send(*_json({
+                    "ok": False, "error": "guard 模块不可用，没法验证",
+                }, 500))
+
+            if not code:
+                ok, msg = _g.send_code_email(purpose, "切安全模式")
+                return self._send(*_json({
+                    "ok": False,
+                    "need_code": True,
+                    "mode": mode,
+                    "message": msg if ok else f"发码失败：{msg}",
+                }))
+
+            ok, msg = _g.verify(purpose, code)
+            if not ok:
+                return self._send(*_json({
+                    "ok": False,
+                    "need_code": True,
+                    "error": msg,
+                }, 400))
+
+            try:
+                _sm2.set_mode(mode)
+            except Exception as e:  # noqa: BLE001
+                return self._send(*_json({
+                    "ok": False,
+                    "error": f"设不了：{type(e).__name__}: {e}",
+                }, 500))
+
+            st = _sm2.status()
+            st["ok"] = True
+            st["verified"] = True
+            return self._send(*_json(st))
 
         if path == "/api/engine/models":
             try:
@@ -827,7 +1383,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/guard":
             try:
-                return self._send(*_json(self._guard_set(body)))
+                r = self._guard_set(body)
+                # ⚠️ 改完邮箱配置要**立刻清能力缓存**。
+                #
+                #    老爸实测（2026-11-05）：
+                #        「我关掉邮箱，立刻点击严格防护，是可以点击的，
+                #          但是过了一会儿不行；开启后也一样。」
+                #
+                #    原因：capabilities 缓存 30 秒。
+                #    用户改完配置，界面还在用旧数据判按钮灰不灰。
+                #    点完这一下就清，下次读立刻是新的。
+                try:
+                    from guard import capabilities as _cap2
+
+                    _cap2.clear_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+                return self._send(*_json(r))
             except Exception as e:  # noqa: BLE001
                 return self._send(*_json({"ok": False, "error": str(e)}, 500))
 
@@ -895,6 +1467,78 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(*_json({"ok": ok, "message": msg}, 200 if ok else 400))
             except Exception as e:  # noqa: BLE001
                 return self._send(*_json({"ok": False, "error": str(e)}, 500))
+
+        if path == "/api/quiet":
+            # 静默模式：验过码之后，把"要验证码的关卡"关一段时间。
+            #
+            # ⚠️ **开静默必须先验码。**
+            #
+            #    这是整套体系里最危险的一个操作 —— 它把五道关全关了。
+            #    如果能不验码就开，那攻击者只要在聊天里说一句
+            #    "帮我关一下验证码"就全绕过了。
+            #
+            #    所以这里强制要 code：
+            #        code 来自 guard.verify() 那条路（用户填邮箱里的码）。
+            #
+            # ⚠️ 关多久**由用户说**，不是固定的 1h/4h/到今晚。
+            #    前台把"关到下午五点"翻译成 seconds 再传进来。
+            try:
+                from guard import guard as _g
+                from guard import quiet as _q
+
+                action = self._str_field(body, "action", "start").strip() or "start"
+
+                # ── 结束静默：不用码 ──
+                #    恢复保护永远是安全的，不需要证明什么。
+                if action == "stop":
+                    ok, msg = _q.stop("手动恢复")
+                    return self._send(*_json({"ok": ok, "message": msg, **_q.status()}))
+
+                # ── 查看状态：不用码 ──
+                if action == "status":
+                    return self._send(*_json({"ok": True, **_q.status()}))
+
+                # ── 开始静默：必须验码 ──
+                code = self._str_field(body, "code").strip()
+                seconds = body.get("seconds")
+
+                if not code:
+                    return self._send(*_json({
+                        "ok": False,
+                        "need_code": True,
+                        "error": "开静默要先验证码。先把邮箱里的码填进来。",
+                    }, 400))
+
+                # 验码。用固定的 UNLOCK_TARGET 当目标 ——
+                # 静默是全局的，不跟某个具体任务绑定。
+                ok, msg = _g.unlock_with_code(code)
+                if not ok:
+                    return self._send(*_json({
+                        "ok": False,
+                        "error": "验证码不对",
+                        "detail": msg,
+                    }, 400))
+
+                try:
+                    secs = int(seconds or 0)
+                except (TypeError, ValueError):
+                    secs = 0
+
+                if secs <= 0:
+                    return self._send(*_json({
+                        "ok": False,
+                        "error": "码验过了，但没说关多久。告诉我要关到几点。",
+                        "verified": True,
+                    }, 400))
+
+                ok2, msg2 = _q.start(secs, self._str_field(body, "why") or "用户验码后关闭验证")
+                return self._send(*_json({
+                    "ok": ok2,
+                    "message": msg2,
+                    **_q.status(),
+                }, 200 if ok2 else 400))
+            except Exception as e:  # noqa: BLE001
+                return self._send(*_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500))
 
         if path == "/api/guard/check":
             try:
@@ -1106,6 +1750,16 @@ class Handler(BaseHTTPRequestHandler):
                     "status": s.get("status") or t.get("status"),
                     "task": t.get("task") or "",
                     "seconds": s.get("seconds") or t.get("seconds"),
+                    # ⚠️ created_at 原来漏了。
+                    #
+                    #    tasks.jsonl 里明明记着它（派活那一刻的时间），
+                    #    但这里没往上报，前端就拿不到"这条是什么时候派的"。
+                    #    于是"最近的活"没法按时间排序，只能看返回顺序 ——
+                    #    而返回顺序是按 updated_at 排的，
+                    #    跑完的会跑到正在跑的前面，看着很乱。
+                    #
+                    #    （2026-11-05 老爸要"最新的几条放上面"才发现的。）
+                    "created_at": t.get("created_at"),
                     "started_at": t.get("started_at"),
                     "finished_at": t.get("finished_at"),
                     "updated_at": s.get("updated_at") or t.get("updated_at"),
@@ -1128,8 +1782,19 @@ class Handler(BaseHTTPRequestHandler):
                     "turns": s.get("turns"),
                     "compactions": s.get("compactions"),
                 })
-            # 最近更新的排前面
-            out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
+            # ⚠️ 排序规则：**按派出时间倒序**（最新的在最前）。
+            #
+            #    原来是按 updated_at 排。问题：
+            #        一条昨天派的老任务，今天重跑一下，
+            #        updated_at 变成今天 —— 就排到最新的前面了。
+            #        用户看到的是"最上面那条不是我刚派的"。
+            #
+            #    现在按 created_at。它不会变，就是"这条什么时候派的"。
+            #    没有 created_at 的（老数据）退回 updated_at。
+            out.sort(
+                key=lambda x: x.get("created_at") or x.get("updated_at") or "",
+                reverse=True,
+            )
             self._send(*_json(out))
         except Exception as e:  # noqa: BLE001
             self._send(*_json({"error": f"{type(e).__name__}: {e}"}, 500))
@@ -1424,6 +2089,24 @@ class Handler(BaseHTTPRequestHandler):
         为什么要在界面上放这个：
             用户填完不知道自己填对没有。等派了一个活失败了才
             发现地址写错，那就太晚了。
+
+        ## ⚠️ 没带 Key 的时候，要找**对**那个Key
+
+            老爸实测（2026-11-05）：
+                「审计员那边为啥我填写测试是通了，
+                  但是保存后再测试，返回 401？」
+
+            原因链：
+                ① 测试请求 body 里带的是**界面上的** Key
+                ② 保存之后界面把 Key 框清空（防复制，只留"尾号 xxxx"）
+                ③ 再点测试 → body 里没有 api_key
+                ④ 这里去 _profile_creds() 补 —— 那个函数找的是
+                   **任务端模型**的 Key（active 那套）
+                ⑤ 拿 DeepSeek 的 Key 去连硅基流动的地址 → **401**
+
+            所以补 Key 的时候得先按 base_url 找：
+                这个地址是不是审计员配的那个？是就用审计员的 Key。
+                （用户改的那个输入框地址跟已保存的一致，说明还是同一家。）
         """
         from engine import test_connection
 
@@ -1431,7 +2114,11 @@ class Handler(BaseHTTPRequestHandler):
         model = (body.get("model") or "").strip()
         key = (body.get("api_key") or "").strip()
 
-        # 同 _engine_models：Key 从"正在改的那套"取，不从旧的单套配置取。
+        # 没带 Key：先看这个地址是不是审计员那条线
+        if not key and base:
+            key = _auditor_key_for(base)
+
+        # 再兜底到"正在改的那套"模型配置
         if not key:
             base2, key = _profile_creds(body.get("id") or "", base)
             base = base or base2

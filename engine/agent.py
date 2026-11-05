@@ -142,6 +142,32 @@ def run(task: str, workdir: str, llm: LLM, max_steps: int = 40,
         prog.prompt_tokens += reply.prompt_tokens
         prog.completion_tokens += reply.completion_tokens
 
+        # ── 记一笔真实花销 ──
+        #
+        # ⚠️ 用接口回来的 usage，不靠估算。
+        #
+        #    原来界面上的费用是"读会话文件体积 ÷ 1.6 × DeepSeek 的价"，
+        #    三个问题：只认一种价、永远按未命中缓存算、体积≠用量。
+        #
+        #    现在每一次模型调用都按标准 OpenAI 的三段式计价，
+        #    记进账本；概览页的"今日总花销"就是这些加起来。
+        #
+        #    算钱不是主业，失败不能影响任务，所以整个包在 try 里。
+        try:
+            from engine import pricing as _pricing
+
+            _pricing.record(
+                profile_id=getattr(llm, "profile_id", "") or "",
+                model=getattr(llm, "model", "") or "",
+                task_name=task_name or "",
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                cached_tokens=reply.cached_tokens,
+                prices=getattr(llm, "prices", None) or None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         # 没有工具调用 → 它说完了，收工
         if not reply.tool_calls:
             messages.append({"role": "assistant", "content": reply.content or ""})

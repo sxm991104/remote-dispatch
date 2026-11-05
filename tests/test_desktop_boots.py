@@ -116,12 +116,13 @@ def test_all_pages_switch(main_window):
 
 
 def test_settings_cards_exist(main_window):
-    """设置页那几张卡的关键控件都在。
+    """配置页那几张卡的关键控件都在。
 
-    切到设置页之后，各 _card_* 已经在 __init__ 里建过了，
-    这里只确认它们留下的属性存在 —— 不再重复构造。
+    新结构下这些卡分到了不同页：
+        模型卡在「模型」页(3)，审核员/验证码在「安全」页(4)。
     """
-    main_window.switch(3)
+    main_window.switch(3)   # 模型页
+    main_window.switch(4)   # 安全页
 
     for attr in (
         "switch_auditor", "lbl_auditor_state",
@@ -129,7 +130,7 @@ def test_settings_cards_exist(main_window):
         "cmb_auditor_model", "lbl_auditor_msg",
         "profile_box", "btn_guard",
     ):
-        assert hasattr(main_window, attr), f"设置页缺控件：{attr}"
+        assert hasattr(main_window, attr), f"配置页缺控件：{attr}"
 
 
 def test_refresh_runs(main_window):
@@ -157,3 +158,34 @@ def test_detail_dialog_constructs(main_window):
     )
     assert d is not None
     d.deleteLater()
+
+
+def test_render_list_twice_no_crash(main_window):
+    """列表连刷两次不炸 —— setColor vs set_color 那个真 bug 只在第二次刷才爆。
+
+    ⚠️ 背景（2026-11-05）：
+        GlowDot 的方法叫 set_color，但有地方写成了 setColor。
+        第一次刷新没走到那条路（后台没好 / 数据空），静态检查也看不出来；
+        真等到第二次带数据的刷新，点就调了一个不存在的方法 → 崩。
+
+        所以光"建一次窗口"不够 —— 要把渲染路径**连走两遍**，
+        第二遍才会把这种"第一次侥幸没炸"的错抖出来。
+    """
+    main_window.switch(0)   # 任务页
+
+    # 喂一批假任务，连渲染两次
+    main_window.tasks = [
+        {"name": "测试一", "status": "running", "task": "跑一下",
+         "elapsed": 3.0, "cost": 0.01},
+        {"name": "测试二", "status": "ok", "task": "跑完",
+         "elapsed": 9.0, "cost": 0.02},
+    ]
+    main_window._render_tasks()
+    main_window._render_tasks()      # 第二遍：那个 bug 只在这遍才炸
+
+    # 顶栏状态灯也刷两次（pill 的 dot.set_color 就是当年写错的那个调用）
+    from theme import C_OK, C_BAD
+    for _ in range(2):
+        for dot in main_window.pills.values():
+            dot.set_color(C_OK)
+            dot.set_color(C_BAD)

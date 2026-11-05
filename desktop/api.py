@@ -144,6 +144,13 @@ class Api(QObject):
         super().__init__(parent)
         self._pending_cb = None
         self._once.connect(self._dispatch_once)
+        # 同一个路径的请求还没回来时不再发第二个。
+        #
+        # 轮询是每 3 秒一轮，而一次请求最长等 6 秒。后台忙的时候
+        # 会有两三个同路径的请求叠着，回来还是乱序的 ——
+        # 界面先看到新的、再被旧的盖回去。
+        self._inflight: set[str] = set()
+        self._inflight_lock = threading.Lock()
 
     def _dispatch_once(self, payload) -> None:
         """收到请求结果，调它自己的回调。"""
@@ -155,17 +162,24 @@ class Api(QObject):
                 pass
 
     def get(self, path: str) -> None:
+        with self._inflight_lock:
+            if path in self._inflight:
+                return
+            self._inflight.add(path)
         threading.Thread(target=self._get, args=(path,), daemon=True).start()
 
     def _get(self, path: str) -> None:
         try:
             req = urllib.request.Request(
-                API + path, headers={"X-Token": _token()}
+                API + path, headers={"X-Token": _token(), "X-Client": "desktop"}
             )
             with urllib.request.urlopen(req, timeout=6) as r:
                 self.done.emit(path, json.loads(r.read()))
         except Exception:  # noqa: BLE001
             self.done.emit(path, None)
+        finally:
+            with self._inflight_lock:
+                self._inflight.discard(path)
 
     def request_once(self, path: str, body: dict | None = None,
                      timeout: int = 20, callback=None) -> None:
@@ -175,7 +189,7 @@ class Api(QObject):
             try:
                 if body is None:
                     req = urllib.request.Request(
-                        API + path, headers={"X-Token": _token()}
+                        API + path, headers={"X-Token": _token(), "X-Client": "desktop"}
                     )
                     with urllib.request.urlopen(req, timeout=timeout) as r:
                         data = json.loads(r.read())
@@ -225,6 +239,10 @@ class Api(QObject):
                 headers={
                     "Content-Type": "application/json",
                     "X-Token": _token(),
+                    # ⚠️ 告诉服务端"我是本机桌面端"。
+                    #    有些接口（比如 /api/guard）会把明文邮箱、
+                    #    SMTP 账号只发给桌面端，前台拿不到。
+                    "X-Client": "desktop",
                 },
                 method="POST",
             )

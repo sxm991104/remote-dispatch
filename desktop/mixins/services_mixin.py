@@ -177,7 +177,7 @@ class ServicesPageMixin:
         ⚠️ 顶栏那个 QQ 灯也删了，所以 self.pills["qq"] 会 KeyError。
            改成 .get() 拿，拿不到就跳过。
         """
-        card = self.svc_cards.get("qq")
+        card = getattr(self, "svc_cards", {}).get("qq")
         if card:
             card.clear_working()
             card.set_ok(False)
@@ -203,10 +203,40 @@ class ServicesPageMixin:
             if k not in d:
                 continue
             dot.set_color(C_OK if d.get(k) else C_BAD)
-        for k, card in self.svc_cards.items():
+        for k, card in getattr(self, "svc_cards", {}).items():
             if k not in d:
                 continue
             card.set_ok(bool(d.get(k)))
+
+        # 左下角那张卡也要跟着走。
+        #
+        # ⚠️ 原来这张卡**只在创建时写过一次「正在连接…」**，
+        #    全项目再没人更新它 —— 桥服务明明活着、
+        #    顶栏灯是绿的，左下角却一直说在连。
+        #
+        #    （2026-11-05 真开窗口发现的。）
+        self._refresh_side_engine(d)
+
+    def _refresh_side_engine(self, d: dict) -> None:
+        """把左下角「任务端」那张卡画成真实状态。"""
+        lbl = getattr(self, "_side_engine", None)
+        if lbl is None:
+            return
+
+        port = "8790"
+        try:
+            from api import _API_PORT
+
+            port = str(_API_PORT)
+        except Exception:  # noqa: BLE001
+            pass
+
+        if bool(d.get("bridge")):
+            lbl.setText(f"运行中 · {port}")
+            lbl.setStyleSheet(f"color:{C_OK}; font-size:10px;")
+        else:
+            lbl.setText("没连上")
+            lbl.setStyleSheet(f"color:{C_BAD}; font-size:10px;")
 
     def _svc_action(self, key: str, action: str) -> None:
         """启动或重启一个服务。

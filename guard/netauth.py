@@ -82,6 +82,18 @@ def ensure_code() -> tuple[str, bool]:
     ⚠️ 10 分钟内已经发过就复用 —— 用户可能手慢，或者邮件延迟。
         每要一次就换一个码，他手上的就失效了，越急越乱。
     """
+    # ⚠️ 静默期间不生成、也不要求码。
+    #
+    #    返回 ("0", False) —— 调用方拿到空码就当"不用验"处理。
+    #    用户验过邮箱码换了静默期，这段时间里外传不该再拦他。
+    try:
+        from guard import quiet as _q
+
+        if _q.is_quiet():
+            return "", False
+    except Exception:  # noqa: BLE001
+        pass
+
     d = _load()
     code = str(d.get("code") or "")
     expires = float(d.get("expires") or 0)
@@ -145,6 +157,27 @@ def verify(code: str) -> tuple[bool, str]:
     d["wrong"] = wrong
     _save(d)
     return False, f"码不对，还能再试 {left} 次"
+
+
+def has_pending() -> bool:
+    """现在有没有一个还没过期的联网码在等用户填。
+
+    ⚠️ 为什么需要这个：
+
+        外传发码的时候，任务端应该**跟着锁死** ——
+        一条码没过，说明"有人在申请放行联网"，
+        这时候不该再往机器上堆新活。
+
+        原来 guard.check() 只看自己的 pending，
+        外传发码后 gate() 还是 allow=True，任务照派。
+
+        实测（2026-11-05）：老爸问"是不是所有要验证码的都锁死"，
+        实测发现外传和审计员都没锁。
+    """
+    d = _load()
+    code = str(d.get("code") or "")
+    expires = float(d.get("expires") or 0)
+    return bool(code) and time.time() < expires
 
 
 def clear() -> None:

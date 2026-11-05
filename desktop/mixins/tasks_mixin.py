@@ -62,21 +62,11 @@ class TasksPageMixin:
 
     def _build_tasks_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("pagebg")
+        page.setStyleSheet(f"QWidget#pagebg {{ background:{C_BG}; }}")
         lay = QVBoxLayout(page)
         lay.setContentsMargins(28, 24, 28, 22)
         lay.setSpacing(16)
-
-        head = QVBoxLayout()
-        head.setSpacing(4)
-        h = QLabel("任务")
-        h.setFont(font(19, QFont.Bold))
-        h.setStyleSheet(f"color:{C_TEXT};")
-        sub = QLabel("派出去让电脑干的活，都在这儿。")
-        sub.setFont(font(12))
-        sub.setStyleSheet(f"color:{C_DIM};")
-        head.addWidget(h)
-        head.addWidget(sub)
-        lay.addLayout(head)
 
         # ⚠️ 派活输入框去掉了。
         #
@@ -129,6 +119,24 @@ class TasksPageMixin:
             "}"
         )
 
+        # 筛选胶囊放在 tab 栏右边（设计稿：左 tab 右筛选同一行）
+        self.chip_btns = []
+        chip_host = QWidget()
+        chip_row = QHBoxLayout(chip_host)
+        chip_row.setContentsMargins(0, 0, 0, 0)
+        chip_row.setSpacing(6)
+        for ckey, ctext in (("all", "全部"), ("running", "运行中"),
+                            ("ok", "已完成"), ("bad", "失败")):
+            c = QPushButton(ctext)
+            c.setObjectName("chip")
+            c.setCheckable(True)
+            c.setChecked(ckey == self.filter)
+            c.setCursor(Qt.PointingHandCursor)
+            c.clicked.connect(lambda _=False, k=ckey: self._set_filter(k))
+            chip_row.addWidget(c)
+            self.chip_btns.append((ckey, c))
+        self.model_tabs.setCornerWidget(chip_host, Qt.TopRightCorner)
+
         # 每个 tab 的内容是一个滚动区，装这个模型名下的任务行
         self.task_tab_host = QWidget()
         self.task_tab_host_lay = QVBoxLayout(self.task_tab_host)
@@ -137,6 +145,18 @@ class TasksPageMixin:
 
         lay.addWidget(self.model_tabs, 1)
 
+        # 没配模型 / 没任务时的空态（平时藏起来，有数据时由 _render_tasks 切换）
+        self._tasks_empty = QLabel(
+            "还没有配置模型。去「模型」页加一套，任务才知道交给谁跑。"
+        )
+        self._tasks_empty.setFont(font(11.5))
+        self._tasks_empty.setWordWrap(True)
+        self._tasks_empty.setStyleSheet(
+            f"color:{C_DIM2}; background:{C_SURFACE}; border-radius:12px;"
+            " padding:28px 24px;"
+        )
+        self._tasks_empty.setVisible(False)
+        lay.addWidget(self._tasks_empty, 1)
 
         return page
 
@@ -163,6 +183,37 @@ class TasksPageMixin:
         profs = getattr(self, "_profiles", None) or []
         tasks = getattr(self, "tasks", None) or []
 
+        # ⚠️ 先把任务身上的 profile 归一成模型 id。
+        #
+        #    任务里存的值有**两种格式**，混在一起的：
+        #
+        #        新任务    p1793460955495      ← 模型 id
+        #        老任务    deepseek / kimi    ← 模型名（小写）
+        #
+        #    而 tab 是按模型 id 建的。不归一的话，
+        #    老任务（37 个 kimi + 28 个 deepseek）哪个 tab 都进不去 ——
+        #    表现就是"Kimi 那个 tab 是空的，任务全堆在第一个 tab 里"。
+        #
+        #    实测（2026-11-05）：老爸切到 kimi 的 tab 再点状态筛选，
+        #    跳回第一个；而且 deepseek 下面显示着一堆 kimi 的活。
+        def _norm(t: dict) -> str:
+            raw = str(t.get("profile") or "").strip()
+            if not raw:
+                return ""
+            # 已经是对得上的 id，直接用
+            for p in profs:
+                if raw == (p.get("id") or ""):
+                    return raw
+            # 不然按名字对（不分大小写，去掉空格和横线）
+            key = raw.lower().replace(" ", "").replace("-", "").replace("_", "")
+            for p in profs:
+                nm = str(p.get("name") or "").lower().replace(" ", "")
+                nm = nm.replace("-", "").replace("_", "")
+                if nm and nm == key:
+                    return p.get("id") or ""
+            # 对不上就归到"认不出来的"，别悄悄塞进第一个 tab
+            return ""
+
         # 筛选
         shown = tasks
         if self.filter == "running":
@@ -173,8 +224,13 @@ class TasksPageMixin:
             shown = [t for t in tasks if t.get("status") in ("error", "timeout")]
 
         groups: dict = {}
+        orphan = 0
         for t in shown:
-            groups.setdefault(t.get("profile") or "", []).append(t)
+            pid = _norm(t)
+            if not pid:
+                orphan += 1
+                continue
+            groups.setdefault(pid, []).append(t)
 
         order = {"running": 0, "pending": 1, "queued": 1}
         for k in groups:
@@ -182,20 +238,16 @@ class TasksPageMixin:
                 groups[k], key=lambda t: order.get(t.get("status"), 2)
             )
 
-        # 没有配置时给一句提示
+        # 没有配置时给一句明确提示
         if not profs:
-            if getattr(self, "_render_sig", None) == ("noprof",):
-                return
             self._clear_tabs()
-            lb = QLabel(
-                "还没有配置模型。去「设置」里加一套，任务才知道交给谁跑。"
-            )
-            lb.setFont(font(11))
-            lb.setWordWrap(True)
-            lb.setStyleSheet(f"color:{C_DIM2}; padding:16px 0;")
-            self.task_tab_host.layout().addWidget(lb)
+            self.model_tabs.setVisible(False)
+            self._tasks_empty.setVisible(True)
             self._render_sig = ("noprof",)
             return
+        # 有配置：把空态藏起来，显示 tab 区
+        self._tasks_empty.setVisible(False)
+        self.model_tabs.setVisible(True)
 
         # ── 指纹 ──
         sig = tuple(
@@ -214,58 +266,47 @@ class TasksPageMixin:
                 items = groups.get(pid, [])[:self._list_limit]
                 for t, row in zip(items, block["rows"]):
                     row.update_data(t)
-                block["stat"].setText(self._model_stat_text(items, p))
-                block["dot"].setColor(C_OK if items else C_DIM2)
             return
 
         # ── 结构变了：重建 ──
+        #
+        # ⚠️ 重建之前先记住"现在选的是哪个模型"。
+        #
+        #    原来是直接 _clear_tabs() 再从头 addTab，
+        #    重建完 tab 默认停在第 0 个。
+        #
+        #    于是：切到 Kimi 的 tab → 点一下状态筛选（触发重建）
+        #          → **跳回第一个模型**。
+        #
+        #    实测（2026-11-05）：老爸切到备用 Kimi 再点状态，
+        #    每次都弹回去，看着像筛选把 tab 重置了。
+        #
+        #    这里按模型 id 记，不按序号 —— 模型增删之后序号会变。
+        try:
+            _keep = self.model_tabs.currentIndex()
+            _keep_pid = ""
+            _blocks_before = getattr(self, "_task_blocks", {}) or {}
+            for _pid, _b in _blocks_before.items():
+                if _b.get("index") == _keep:
+                    _keep_pid = _pid
+                    break
+        except Exception:  # noqa: BLE001
+            _keep_pid = ""
+
         self._clear_tabs()
         self._task_blocks = {}
-        # 筛选按钮跟着 tab 一起重建，旧的要清掉，
-        # 不然 _set_filter 会去点已经删掉的按钮。
-        self.chip_btns = []
         lay = self.task_tab_host.layout()
 
-        for p in profs:
+        for tab_index, p in enumerate(profs):
             pid = p.get("id") or ""
             items = groups.get(pid, [])[:self._list_limit]
 
             page = QWidget()
+            page.setObjectName("tabpage")
+            page.setStyleSheet(f"QWidget#tabpage {{ background:{C_BG}; }}")
             pl = QVBoxLayout(page)
             pl.setContentsMargins(4, 10, 4, 4)
             pl.setSpacing(10)
-
-            # ── 筛选条（只筛这个模型的任务） ──
-            chips = QHBoxLayout()
-            chips.setSpacing(6)
-            for ckey, ctext in (("all", "全部"), ("running", "运行中"),
-                                ("ok", "已完成"), ("bad", "失败")):
-                c = QPushButton(ctext)
-                c.setObjectName("chip")
-                c.setCheckable(True)
-                c.setChecked(ckey == self.filter)
-                c.setCursor(Qt.PointingHandCursor)
-                c.clicked.connect(
-                    lambda _=False, k=ckey: self._set_filter(k)
-                )
-                chips.addWidget(c)
-                self.chip_btns.append((ckey, c))
-            chips.addStretch()
-            pl.addLayout(chips)
-
-            # ── 状态行 ──
-            head = QHBoxLayout()
-            head.setSpacing(8)
-
-            dot = GlowDot(C_OK if items else C_DIM2, 7)
-            head.addWidget(dot, 0, Qt.AlignVCenter)
-
-            stat = QLabel(self._model_stat_text(items, p))
-            stat.setFont(font(11))
-            stat.setStyleSheet(f"color:{C_DIM};")
-            head.addWidget(stat)
-            head.addStretch()
-            pl.addLayout(head)
 
             # ── 任务行 ──
             rows = []
@@ -293,11 +334,26 @@ class TasksPageMixin:
             scroll.setStyleSheet("QScrollArea { border:none; background:transparent; }")
             scroll.setWidget(page)
 
-            # 每套模型一个 tab。名字用配置里的 name。
-            idx = self.model_tabs.addTab(scroll, p.get("name") or "未命名")
+            # 每套模型一个 tab。第一套是主力，后面是备用，照设计稿加前缀。
+            role = "主力" if tab_index == 0 else "备用"
+            pname = p.get("name") or "未命名"
+            idx = self.model_tabs.addTab(scroll, f"{role}·{pname}")
             self._task_blocks[pid] = {
-                "rows": rows, "stat": stat, "dot": dot, "index": idx,
+                "rows": rows, "index": idx,
             }
+
+        # 恢复到重建前选中的那个模型。
+        #
+        # ⚠️ 找不到就留在第 0 个（比如那个模型被删了）——
+        #    这比瞎猜一个好。
+        if _keep_pid:
+            try:
+                for _pid, _b in self._task_blocks.items():
+                    if _pid == _keep_pid:
+                        self.model_tabs.setCurrentIndex(_b["index"])
+                        break
+            except Exception:  # noqa: BLE001
+                pass
 
         self._render_sig = sig
 

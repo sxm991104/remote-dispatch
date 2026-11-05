@@ -292,9 +292,32 @@ class SettingsGuardMixin:
     def _toggle_guard(self) -> None:
         on = not getattr(self, "_guard_on", False)
         self._guard_on = on
-        self.api.request_once(
-            "/api/guard", {"enabled": on}, callback=lambda _d: self._load_guard()
-        )
+
+        def done(_d) -> None:
+            self._load_guard()
+            # ⚠️ 开关一变，安全模式能不能选就跟着变 —— **必须重拉**。
+            #
+            #    老爸实测（2026-11-05）：
+            #        「我关掉邮箱，立刻点击严格防护，是可以点击的，
+            #          但是过了一会儿不行；开启后也一样，延迟很高。」
+            #
+            #    两层延迟叠在一起：
+            #        ① 服务端 capabilities 缓存 30 秒
+            #           （那个在 /api/guard 处理时清掉了）
+            #        ② **桌面端根本没重新拉安全模式** ——
+            #           它还拿着切页时拿到的那份旧数据在画按钮
+            #
+            #    第二层是主因：不清数据源，清多少缓存都没用。
+            self._refresh_security_mode()
+
+        self.api.request_once("/api/guard", {"enabled": on}, callback=done)
+
+    def _refresh_security_mode(self) -> None:
+        """重新拉一次安全模式（连带能力判断），刷新三个按钮。"""
+        try:
+            self.api.get("/api/security/mode")
+        except Exception:  # noqa: BLE001
+            pass
 
     # 常见邮箱的 SMTP 服务器
     _SMTP = {
@@ -394,6 +417,8 @@ class SettingsGuardMixin:
                 self.lbl_guard_msg.setText("已保存")
                 self._guard_on = True
                 self._load_guard()
+                # 保存完邮箱，安全模式能不能选可能就变了 —— 重拉一次
+                self._refresh_security_mode()
             else:
                 self.lbl_guard_msg.setText("保存失败")
 

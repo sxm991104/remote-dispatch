@@ -82,10 +82,11 @@ class SettingsProfilesMixin:
                     800 * (attempt + 1),
                     lambda: self._load_profiles(attempt + 1),
                 )
-                if attempt == 0:
+                if attempt == 0 and getattr(self, "lbl_engine", None) is not None:
                     self.lbl_engine.setText("正在连后台…")
             else:
-                self.lbl_engine.setText(f"读不到配置：{msg}")
+                if getattr(self, "lbl_engine", None) is not None:
+                    self.lbl_engine.setText(f"读不到配置：{msg}")
                 # 显示一个明确的状态，别让用户以为配置丢了
                 self._profile_error = msg
                 self._render_profiles()
@@ -106,6 +107,13 @@ class SettingsProfilesMixin:
             self._profiles = data.get("profiles") or []
             self._active_pid = data.get("active") or ""
             self._render_profiles()
+            # 任务页按模型分 tab，配置变了那边也要跟着变
+            self._render_tasks()
+
+            # ⚠️ 设置页还没打开（页面是懒构建的）——
+            #    数据已经存到 self._profiles 了，编辑区等切过去再填。
+            if getattr(self, "profile_box", None) is None:
+                return
 
             # ⚠️ 只在**第一次**才把某一套填进编辑区。
             #
@@ -139,6 +147,8 @@ class SettingsProfilesMixin:
                 if pick:
                     self._selected_pid = pick["id"]
                     self._fill_editor(pick)
+                    # 选中项刚定下来，重画一次让「当前」徽标出来。
+                    self._render_profiles()
 
         self.api.request_once("/api/engine/profiles", callback=done)
 
@@ -152,7 +162,45 @@ class SettingsProfilesMixin:
             · 每行高度统一，不因为有没有警告标签而参差
             · 选中的那行用左侧竖条标识，不用整行灰底（灰底看着像禁用）
             · 「缺 Key」放到行尾固定位置，不挤着模型名
+
+        ⚠️ 设置页还没构建时直接跳过（页面是懒加载的）。
+            数据本身在 _load_profiles 里已经存好了。
         """
+        if getattr(self, "profile_box", None) is None:
+            return
+
+        # ⚠️ 列表每 3 秒刷新一次，但绝大多数时候内容一个字都没变。
+        #
+        #    原来是每次全删了重建 —— 十个配置就是几十个控件
+        #    反复创建销毁，屏幕上看得出来在闪，主线程也在白忙。
+        #
+        #    现在先算签名：配置本身、选中项、错误、是否在新增。
+        #    签名没变 → 一个控件都不动。
+        #
+        # ⚠️ 签名必须包含 _active_pid。
+        #
+        #    原来只有 _selected_pid（选中来编辑的那套）。
+        #    而「切换默认模型」只改 active，不改列表内容也不改 selected ——
+        #    签名没变 → 这里直接 return → **「当前」徽标永远停在原来那一行**。
+        #
+        #    实测（2026-11-05）：切回 DeepSeek，徽标还挂在 Kimi 上，
+        #    再切 Kimi，徽标也没动。看着像"切换没生效"，
+        #    其实服务端早改好了，是界面根本没重画。
+        sig = (
+            tuple(
+                (p.get("id"), p.get("name"), p.get("model"),
+                 bool(p.get("has_key")), bool(p.get("enabled", True)))
+                for p in (getattr(self, "_profiles", None) or [])
+            ),
+            getattr(self, "_active_pid", ""),
+            getattr(self, "_selected_pid", ""),
+            getattr(self, "_profile_error", ""),
+            bool(getattr(self, "_is_adding", False)),
+        )
+        if sig == getattr(self, "_prof_sig", None):
+            return
+        self._prof_sig = sig
+
         while self.profile_box.count():
             it = self.profile_box.takeAt(0)
             w = it.widget()
@@ -198,7 +246,7 @@ class SettingsProfilesMixin:
             else:
                 _msg = "还没有模型。点下面「＋ 新增模型」。"
 
-            lb = QLabel(_msg)
+            lb = QLabel(_msg, self.profile_host)
             lb.setFont(font(11))
             lb.setWordWrap(True)
             lb.setStyleSheet(
@@ -207,18 +255,58 @@ class SettingsProfilesMixin:
             self.profile_box.addWidget(lb)
             return
 
-        for prof in self._profiles:
-            # ⚠️ 没有"当前"这个概念了。
-            #
-            #    每套配置只有一个状态：开 / 关。
-            #    开着的都可以同时跑（各自限流、各自排队）。
-            #    用户选哪一套只是"选中来编辑"，不影响跑不跑。
-            is_sel = prof["id"] == getattr(self, "_selected_pid", "")
+        # ── 列头（跟设计稿一致：当前 / 名称 / 模型 / Key）──
+        head = QWidget(self.profile_host)
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(12, 0, 12, 0)
+        hl.setSpacing(10)
+        for title, w in (("当前", 60), ("名称", 150), ("模型", 1), ("Key", 70), ("", 128)):
+            t = QLabel(title)
+            t.setFont(font(10))
+            t.setStyleSheet(f"color:{C_DIM2};")
+            if w == 1:
+                hl.addWidget(t, 1)
+            else:
+                t.setFixedWidth(w)
+                hl.addWidget(t)
+        self.profile_box.addWidget(head)
 
-            row = QFrame()
+        def _pill(text, fg, bg):
+            p = QLabel(text, self.profile_host)
+            p.setFont(font(10))
+            p.setFixedHeight(20)
+            p.setAlignment(Qt.AlignCenter)
+            p.setStyleSheet(
+                f"color:{fg}; background:{bg}; border-radius:10px; padding:0 8px;")
+            return p
+
+        for idx, prof in enumerate(self._profiles):
+            # ⚠️ **两个状态必须分开算，原来混成一个了。**
+            #
+            #    黄色竖条 + 高亮边框  = 用户**手指点中的**那一行
+            #                         → 看 _selected_pid
+            #
+            #    「当前」绿徽标       = 服务端**正在用**的那套
+            #                         → 看 _active_pid
+            #
+            #    原来是一个 is_sel 同时管两件事：
+            #        cur_pid = _active_pid or _selected_pid
+            #    于是点 DeepSeek 那一行，黄条不跟过去（因为 active 还是 Kimi），
+            #    看着就是"点了没反应"。
+            #
+            #    实测（2026-11-05）：老爸点 DeepSeek，黄条还在 Kimi 上。
+            #    他不是说内容没变，是说**指哪不打哪**。
+            _sel = getattr(self, "_selected_pid", "")
+            _act = getattr(self, "_active_pid", "")
+
+            is_sel = bool(_sel) and prof["id"] == _sel      # 手指点中的
+            is_act = bool(_act) and prof["id"] == _act      # 服务端在用的
+            is_on = prof.get("enabled", True)
+
+            row = QFrame(self.profile_host)
             row.setObjectName("profrow")
             row.setCursor(Qt.PointingHandCursor)
-            row.setFixedHeight(44)
+            row.setFixedHeight(46)
             row.setStyleSheet(
                 "QFrame#profrow {"
                 f" background:{C_INPUT};"
@@ -232,121 +320,123 @@ class SettingsProfilesMixin:
             rl.setContentsMargins(12, 0, 12, 0)
             rl.setSpacing(10)
 
-            # 状态点：只有两种
-            #   开着  绿（参与派活）
-            #   关着  灰（不参与）
-            is_on = prof.get("enabled", True)
-            dot = GlowDot(C_OK if is_on else C_DIM2, 7)
-            rl.addWidget(dot, 0, Qt.AlignVCenter)
+            # 「当前」徽标：认的是**服务端在用**的那套，跟点选无关。
+            cur = _pill("当前", C_OK, "rgba(95,198,126,0.14)") if is_act else QLabel("")
+            cur.setFixedWidth(60)
+            rl.addWidget(cur)
 
-            # 名字（固定宽度，让后面的对齐）
-            nm = QLabel(prof.get("name") or "未命名")
+            # 名称：前两套带角色前缀（主力·/备用·），跟设计稿一致。
+            if idx == 0:
+                prefix = "主力·"
+            elif idx == 1:
+                prefix = "备用·"
+            else:
+                prefix = ""
+            nm = QLabel(prefix + (prof.get("name") or "未命名"))
             nm.setFont(font(12, QFont.DemiBold))
             nm.setStyleSheet(f"color:{C_TEXT};")
-            nm.setFixedWidth(110)
+            nm.setFixedWidth(150)
             rl.addWidget(nm)
 
-            # 模型名
+            # 模型
             md = QLabel(prof.get("model") or "(没填模型)")
             md.setFont(font(11))
-            md.setStyleSheet(
-                f"color:{C_DIM if prof.get('model') else C_DIM2};"
-            )
+            md.setStyleSheet(f"color:{C_DIM if prof.get('model') else C_DIM2};")
             rl.addWidget(md, 1)
 
-            # 缺 Key 提示：固定位置，不挤着别的
-            if not prof.get("has_key"):
-                warn = QLabel("缺 Key")
-                warn.setFont(font(10))
-                warn.setStyleSheet(f"color:{C_WARN};")
-                warn.setFixedWidth(48)
-                warn.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                rl.addWidget(warn)
+            # Key：绿「已填」/ 红「缺 Key」
+            if prof.get("has_key"):
+                key = _pill("已填", C_OK, "rgba(95,198,126,0.14)")
+            else:
+                key = _pill("缺 Key", C_BAD, "rgba(232,106,99,0.14)")
+            key.setFixedWidth(70)
+            rl.addWidget(key)
 
-            # 右侧：**每套独立开关** + 删除
-            #
-            # ⚠️ 这里改过一次，原来只有两种状态：
-            #        在用      显示"✓ 正在用"
-            #        没在用    [启用] ← 点了会切过去
-            #
-            #    但那不是"开关"，是"切换"。用户想的是：
-            #        这套先用着，那套先关掉
-            #    而不是"只能有一个在用，选另一个就换掉"。
-            #
-            #    现在每套都有自己的开关：
-            #        开着  这套参与派活（可以是多套同时开，各跑各的）
-            #        关着  不参与，队列里也不排它
-            #
-            #    另外"当前默认用哪套"是另一件事，点行本身来切。
+            # 操作区：编辑（选中+填进卡2）+ 停用/启用 + 删。
+            act = QWidget(row)
+            al = QHBoxLayout(act)
+            al.setContentsMargins(0, 0, 0, 0)
+            al.setSpacing(6)
 
-            # 开关
-            #
-            # ⚠️ 按钮文字说的是"点下去会怎样"，不是"现在什么状态"。
-            #
-            #    原来写的是「开着 / 关着」——那是描述状态，
-            #    用户看见「开着」会以为"点它也是开"，不敢点。
-            #
-            #    现在：开着 →「停用」，关着 →「启用」。
-            #    状态本身由左边的绿点/灰点表示。
+            edb = QPushButton("编辑")
+            edb.setCursor(Qt.PointingHandCursor)
+            edb.setFixedSize(44, 26)
+            edb.setStyleSheet(
+                f"QPushButton{{color:{C_TEXT}; background:{C_SURFACE};"
+                f"border:1px solid {C_LINE}; border-radius:6px; font-size:11px;}}"
+                f"QPushButton:hover{{border-color:{C_ACCENT}; color:{C_ACCENT};}}")
+            al.addWidget(edb)
+
             sw = QPushButton("停用" if is_on else "启用")
             sw.setCursor(Qt.PointingHandCursor)
-            sw.setFixedSize(52, 26)
-            # ⚠️ 颜色跟着**动作**走，不跟状态走。
-            #
-            #    原来：开着绿、关着灰——颜色在描述状态，
-            #    文字却说"停用/启用"，两边打架。
-            #
-            #    现在：
-            #        开着 →「停用」红描边（点了会关掉，给个警示色）
-            #        关着 →「启用」绿实心（点了会打开，给个正色）
-            #
-            #    这样看颜色就知道点下去是"好事"还是"会关掉"。
+            sw.setFixedSize(44, 26)
             if is_on:
                 sw.setStyleSheet(
                     f"QPushButton{{color:{C_BAD}; background:transparent;"
-                    f"border:1px solid {C_BAD}; border-radius:6px;"
-                    f"font-size:11px;}}"
-                    f"QPushButton:hover{{background:{C_BAD}; color:white;}}"
-                )
+                    f"border:1px solid {C_BAD}; border-radius:6px; font-size:11px;}}"
+                    f"QPushButton:hover{{background:{C_BAD}; color:white;}}")
             else:
                 sw.setStyleSheet(
                     f"QPushButton{{color:white; background:{C_OK};"
-                    f"border:1px solid {C_OK}; border-radius:6px;"
-                    f"font-size:11px;}}"
-                    f"QPushButton:hover{{background:{C_OK}; color:white;}}"
-                )
+                    f"border:1px solid {C_OK}; border-radius:6px; font-size:11px;}}"
+                    f"QPushButton:hover{{background:{C_OK}; color:white;}}")
             sw.clicked.connect(
-                lambda _=False, pid=prof["id"], now=is_on: self._toggle_profile(pid, now)
-            )
-            rl.addWidget(sw)
+                lambda _=False, pid=prof["id"], now=is_on: self._toggle_profile(pid, now))
+            al.addWidget(sw)
 
-            # 删除
             dele = QPushButton("删")
             dele.setCursor(Qt.PointingHandCursor)
-            dele.setFixedSize(30, 26)
+            dele.setFixedSize(28, 26)
             dele.setStyleSheet(
                 f"QPushButton{{color:{C_DIM2}; background:transparent;"
-                f"border:1px solid {C_LINE}; border-radius:6px;"
-                f"font-size:11px;}}"
-                f"QPushButton:hover{{color:{C_BAD}; border-color:{C_BAD};}}"
-            )
+                f"border:1px solid {C_LINE}; border-radius:6px; font-size:11px;}}"
+                f"QPushButton:hover{{color:{C_BAD}; border-color:{C_BAD};}}")
             dele.clicked.connect(
-                lambda _=False, pid=prof["id"]: self._delete_profile_by_id(pid)
-            )
-            rl.addWidget(dele)
+                lambda _=False, pid=prof["id"]: self._delete_profile_by_id(pid))
+            al.addWidget(dele)
+
+            act.setFixedWidth(128)
+            rl.addWidget(act)
 
             def on_click(_e, pid=prof["id"]):
-                # 点已有的一行 → 退出新增模式。
-                # 不然 _is_adding 还挂着 True，刷新逻辑会一直
-                # 认为"用户正在新增"，永不回填。
+                """点行 = **选中来编辑** + **切换成当前在用的那套**。
+
+                ⚠️ 原来这里只做前半截：把 _selected_pid 换成这一套，
+                    重画一次让黄条跟过去。**但从来没调 _switch_profile。**
+
+                    于是：
+                        黄条跟着手指走（对的）
+                        「当前」绿徽永远不动（因为服务端 active 没变）
+
+                    看着就是"点了没反应"。
+
+                    实测（2026-11-05）：老爸点 DeepSeek，
+                    黄条过去了，「当前」还赖在 Kimi 上。
+
+                ⚠️ 已经是在用的那套，就别再发一次切换请求。
+                    省一次往返，也免得 lbl_engine 闪一下"已切换"。
+
+                ⚠️ 这里**不再单独 _render_profiles()**。
+                    重画交给 _switch_profile 做（它会把 _active_pid
+                    和 _selected_pid 一起改完再画一次）。
+                    两边都画 = 连闪两下。
+                """
                 self._is_adding = False
                 self._selected_pid = pid
-                self._render_profiles()
-                cur = next((x for x in self._profiles if x["id"] == pid), None)
-                if cur:
-                    self._fill_editor(cur)
+
+                cur_p = next((x for x in self._profiles if x["id"] == pid), None)
+                if cur_p:
+                    self._fill_editor(cur_p)
+
+                if pid != getattr(self, "_active_pid", ""):
+                    # 切换成这一套（它会统一重画一次）
+                    self._switch_profile(pid)
+                else:
+                    # 已经是在用的那套：只重画一下让黄条跟过去
+                    self._render_profiles()
 
             row.mousePressEvent = on_click
+            edb.clicked.connect(lambda _=False, pid=prof["id"]: on_click(None, pid))
             self.profile_box.addWidget(row)
 
     def _set_new_mode(self, is_new: bool) -> None:
@@ -381,7 +471,7 @@ class SettingsProfilesMixin:
         self._selected_pid = ""          # 没有绑定的那一套
         self._set_new_mode(True)
 
-        self.edit_title.setText("新增模型")
+        self.edit_title.setText("选一套来改")
         self.ed_base.clear()
         self.ed_key.clear()
         self.ed_key.setPlaceholderText("粘贴你的 API Key")
@@ -418,12 +508,56 @@ class SettingsProfilesMixin:
                               callback=done)
 
     def _switch_profile(self, pid: str) -> None:
+        """把「当前默认用哪套」换成这一套。
+
+        ## 为什么要自己先认下 active
+
+            只靠 _load_profiles() 重新拉一次是不可靠的：
+            它有个请求序号保护，而列表每 3 秒还有一次定时刷新 ——
+            切换那次请求经常被顶掉，结果被丢弃，
+            界面上「当前」就永远停在原来那行。
+
+        ## ⚠️ 只重画一次
+
+            原来这一路会连着重画好几次：
+                on_click 里一次
+                这里进来又一次
+                请求回来又一次
+                _load_profiles 回来又一次
+            每一轮都是"清空 → 重建"整块列表，屏幕上看得出来在闪。
+
+            现在：状态一次改到位，只在**最后**重画一次。
+            请求回来时如果 active 真的变了才再画（通常不会变）。
+        """
+        # 状态一次改到位
+        self._active_pid = pid
+        self._selected_pid = pid
+
+        prof = next((x for x in (self._profiles or []) if x.get("id") == pid), None)
+        if prof:
+            try:
+                self._fill_editor(prof)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 只在这里重画一次（on_click 那边不再单独重画）
+        self._render_profiles()
+
         def done(data):
             if isinstance(data, dict) and data.get("ok"):
-                self.lbl_engine.setText("已切换")
-                self._load_profiles()
+                new_pid = data.get("active") or pid
+                if new_pid != self._active_pid:
+                    # 服务端认的跟我们想的不一样，以它为准
+                    self._active_pid = new_pid
+                    self._render_profiles()
+                # 这里不再 _load_profiles：定时刷新会拉，
+                # 硬拉一次只会让列表再重建一遍、多闪一下。
             else:
-                self.lbl_engine.setText("切换失败")
+                lbl = getattr(self, "lbl_engine", None)
+                if lbl is not None:
+                    lbl.setText((data or {}).get("error") or "切换失败")
+                # 失败了以服务端为准把状态拉回来
+                self._load_profiles()
 
         self.api.request_once("/api/engine/profiles",
                               {"action": "switch", "id": pid},

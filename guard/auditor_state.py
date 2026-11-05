@@ -292,6 +292,26 @@ def unlock_off(why: str = "") -> None:
     reset(why or "用户主动关掉")
 
 
+def is_asking() -> bool:
+    """审核现在是不是在等用户填码。
+
+    ⚠️ 审计员发码的时候，任务端也应该跟着锁死。
+        理由同 netauth.has_pending。
+
+    ⚠️ 别写成 `str(get() or {}).get("state")` ——
+        str() 先执行，返回的是字符串，再 .get() 直接 AttributeError，
+        而下面 except 一兜就变成永远 False。
+        （写错过一次，2026-11-05，实测 is_asking() 恒为 False。）
+    """
+    try:
+        d = get()
+        if not isinstance(d, dict):
+            return False
+        return str(d.get("state") or "") == STATE_ASKING
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def is_locked() -> bool:
     return get()["state"] == STATE_LOCKED
 

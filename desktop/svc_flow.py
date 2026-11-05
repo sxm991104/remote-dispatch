@@ -44,7 +44,10 @@ from PySide6.QtWidgets import (
 # 各平台该把配置放哪儿，见 tools/userdirs.py
 import tools.userdirs as _userdirs
 
-API = "http://127.0.0.1:8790"
+# ⚠️ 端口跟 desktop/api.py 一样从环境变量读。
+#    原来这里是写死的 8790：用户用 DSH_BRIDGE_PORT 换了端口，
+#    主界面连新端口，服务状态轮询还在问老端口 —— 按钮永远全红。
+API = f"http://127.0.0.1:{int(os.environ.get('DSH_BRIDGE_PORT') or 8790)}"
 
 
 def _token() -> str:
@@ -147,12 +150,31 @@ class ServiceMonitor(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._busy: set[str] = set()
+        self._paused = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(1500)
         QTimer.singleShot(200, self._tick)
 
+    def pause(self) -> None:
+        """窗口最小化、或后台还没起来时停下。
+
+        ⚠️ 光 stop() 不够：上面那个 singleShot(200) 还会进来一次，
+            _tick 里看到 timer 没在跑又会把它启动起来。
+            所以用一个显式的标志位。
+        """
+        self._paused = True
+        self.timer.stop()
+
+    def resume(self) -> None:
+        self._paused = False
+        if not self.timer.isActive():
+            self.timer.start(1500)
+        self._tick()
+
     def _tick(self) -> None:
+        if self._paused:
+            return
         # 定时器必须每次都活着。曾经因为一次异常让 timer 停了，
         # 表现就是偶尔"一闪而过"——窗口在，但再也不刷新了。
         if not self.timer.isActive():

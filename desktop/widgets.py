@@ -185,19 +185,10 @@ class TaskRow(QFrame):
         top = QHBoxLayout()
         top.setSpacing(8)
 
-        self._dot = GlowDot(color, 6)
-        top.addWidget(self._dot, 0, Qt.AlignVCenter)
-
         self._name = QLabel(self.name)
         self._name.setFont(font(13, QFont.DemiBold))
         self._name.setStyleSheet(f"color:{C_TEXT};")
         top.addWidget(self._name)
-
-        self._badge = QLabel(STATUS_TEXT.get(st, st))
-        self._badge.setStyleSheet(self._badge_style(st))
-        self._badge.setAlignment(Qt.AlignCenter)
-        self._badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        top.addWidget(self._badge)
 
         top.addStretch()
         body.addLayout(top)
@@ -218,7 +209,16 @@ class TaskRow(QFrame):
 
         self._time = QLabel(secs(t.get("seconds")))
         self._time.setFont(font(11))
-        self._time.setStyleSheet(f"color:{C_DIM2};")
+        # ⚠️ 颜色跟左边那条状态色条**保持一致**。
+        #
+        #    原来固定写死成 C_DIM2（灰），于是：
+        #        左边色条是绿的（完成）/ 红的（失败）
+        #        右边那个时间永远是灰的
+        #    一眼扫下去分不清哪条成、哪条败 —— 还得回头找最左边那条细线。
+        #
+        #    实测（2026-11-05）：老爸指着那一列说
+        #    「后面的数字和 — 颜色应该跟竖条一样才对，这样就好分辨」。
+        self._time.setStyleSheet(f"color:{color};")
         self._time.setAlignment(Qt.AlignRight)
         right.addWidget(self._time)
 
@@ -226,8 +226,9 @@ class TaskRow(QFrame):
         hot = isinstance(cost_v, (int, float)) and cost_v >= 0.5
         self._cost = QLabel(money(cost_v))
         self._cost.setFont(font(11))
+        # 花钱多的用橙色提醒（那是另一回事），其余跟状态同色
         self._cost.setStyleSheet(
-            f"color:{C_WARN if hot else C_DIM2}; font-size:11px;"
+            f"color:{C_WARN if hot else color}; font-size:11px;"
         )
         self._cost.setAlignment(Qt.AlignRight)
         right.addWidget(self._cost)
@@ -245,10 +246,6 @@ class TaskRow(QFrame):
 
         self.name = t.get("name", "")
         self._bar.setStyleSheet(f"background:{color}; border-radius:1px;")
-        self._dot.set_color(color)
-
-        self._badge.setText(STATUS_TEXT.get(st, st))
-        self._badge.setStyleSheet(self._badge_style(st))
 
         self._name.setText(self.name)
 
@@ -257,18 +254,26 @@ class TaskRow(QFrame):
             self._desc.setText(desc)
             self._desc.setToolTip((t.get("task") or "")[:600])
 
+        # ⚠️ 时间/费用的颜色要**跟着状态走**，刷新时也得重设。
+        #
+        #    原来这里只在文字变了的时候才动，而且颜色写死 C_DIM2。
+        #    状态从"在跑"变"完成"，色条变绿了，右边数字还是灰的。
+        #
+        #    现在：每次刷新都把颜色对一遍（setStyleSheet 很便宜，
+        #    而且这里本来就每次都在跑）。
         tm = secs(t.get("seconds"))
         if self._time.text() != tm:
             self._time.setText(tm)
+        self._time.setStyleSheet(f"color:{color};")
 
         cost_v = t.get("cost_cny")
         cm = money(cost_v)
         if self._cost.text() != cm:
             self._cost.setText(cm)
-            hot = isinstance(cost_v, (int, float)) and cost_v >= 0.5
-            self._cost.setStyleSheet(
-                f"color:{C_WARN if hot else C_DIM2}; font-size:11px;"
-            )
+        hot = isinstance(cost_v, (int, float)) and cost_v >= 0.5
+        self._cost.setStyleSheet(
+            f"color:{C_WARN if hot else color}; font-size:11px;"
+        )
 
     def mousePressEvent(self, e):  # noqa: N802
         self.clicked.emit(self.name)

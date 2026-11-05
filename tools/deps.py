@@ -136,9 +136,210 @@ def check_python() -> dict:
     }
 
 
+def check_bridge() -> dict:
+    """咱们自己的桥在不在、能不能用。
+
+    ## ⚠️ 桥不是 pip 包
+
+        DEPS 里那些都是 pip 能装的第三方包，导进来就能验。
+        桥是**这个仓库自己** —— 它已经在这儿了（你现在跑的就是它），
+        所以这项永远"装好了"。
+
+        那为什么还要列？
+
+            因为它后面还有一半东西**不一定齐**：
+                模型配了没
+                验证码邮箱配了没
+                端口通不通
+
+            用户看依赖列表，想确认的是"能不能干活"，
+            不是"pip 装没装"。只列 pip 包等于只回答了一半。
+
+    ## 这项查什么
+
+        · 仓库文件在不在（bridge 的入口）
+        · 模型配置有没有
+        · 这几样齐了才算"能干活"
+    """
+    import os
+
+    # 桥的入口就在项目根下
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    has_core = os.path.exists(os.path.join(root, "core", "bridge.py"))
+    has_api = os.path.exists(os.path.join(root, "server", "api_server.py"))
+
+    ok = has_core and has_api
+
+    note = ""
+    if ok:
+        from tools import userdirs
+
+        # 顺手看一眼模型配了没 —— 没配模型等于派不了活
+        try:
+            eng = userdirs.config_file("engine.json")
+            with open(eng, encoding="utf-8") as f:
+                ej = json.load(f)
+            profs = [p for p in (ej.get("profiles") or []) if p.get("enabled", True)]
+            if profs:
+                note = f"{len(profs)} 套模型"
+            else:
+                note = "还没配模型"
+                ok = False
+        except (OSError, json.JSONDecodeError, AttributeError):
+            note = "还没配模型"
+            ok = False
+
+    return {
+        "key": "bridge",
+        "label": "桥（本项目）",
+        "installed": ok,
+        "version": _read_version(),
+        "why": "派活、跑任务、验证码都归它",
+        "needed": True,
+        "can_install": False,
+        "note": note,
+    }
+
+
+def _read_version() -> str:
+    """读仓库根的 VERSION。"""
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(root, "VERSION"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _find_atrium() -> str:
+    """atrium 装在哪。
+
+    atrium 是个独立的仓库/包，不一定跟桥在同一个目录里，
+    所以按"用户会怎么装它"的顺序找：
+        一、~/.atrium/ 下面有东西 —— 说明配过（最常见）
+        二、跟桥并排的目录（开发时）
+        三、site-packages 里能 import
+    """
+    import os
+
+    home = os.path.expanduser("~")
+    cands = [
+        os.path.join(home, ".atrium", "config.json"),
+        os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "..", "atrium", "atrium", "__init__.py"),
+    ]
+    for p in cands:
+        try:
+            if os.path.exists(p):
+                return os.path.abspath(p)
+        except OSError:
+            pass
+
+    try:
+        import atrium  # noqa: F401
+
+        return getattr(atrium, "__file__", "") or "installed"
+    except ImportError:
+        return ""
+
+
+def check_atrium() -> dict:
+    """前台（接飞书 / 钉钉的那个）在不在、配全没有。
+
+    ## ⚠️ 为什么依赖列表里要有它
+
+        原来这里查的是 AstrBot —— 那是老版本的前台宿主，已经删了。
+        **删了之后没补上新的**，于是依赖列表只剩一堆 pip 包，
+        看着像"包都装了就能用"，其实少了接聊天平台的那一头。
+
+        （2026-11-05 老爸指出：「依赖不应该加上我们的桥嘛，
+         你给 AstrBot 删了不加上我们的桥」。）
+
+    ## 这项查两件事
+
+        一、atrium 装了没（有没有 ~/.atrium/config.json 或者能 import）
+        二、配了平台没（飞书 app_id / 钉钉 client_id）
+
+    两个都满足才算"能接聊天"。
+    """
+    import os
+
+    where = _find_atrium()
+    if not where:
+        return {
+            "key": "atrium",
+            "label": "前台（atrium）",
+            "installed": False,
+            "version": "",
+            "why": "接飞书 / 钉钉，派活都从它进来",
+            "needed": True,
+            "can_install": False,
+            "note": "没装。装法见 atrium 的 README",
+        }
+
+    # 找到配置就读一下平台
+    cfg = os.path.join(os.path.expanduser("~"), ".atrium", "config.json")
+    chans: list[str] = []
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            ac = json.load(f)
+        plats = ac.get("platforms") or {}
+        if isinstance(plats, dict):
+            for key, label in (("feishu", "飞书"), ("dingtalk", "钉钉")):
+                p = plats.get(key)
+                if not isinstance(p, dict):
+                    continue
+                if p.get("enabled") is False:
+                    continue
+                if key == "feishu" and p.get("app_id"):
+                    chans.append(label)
+                elif key == "dingtalk" and p.get("client_id"):
+                    chans.append(label)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    if chans:
+        note = "已配：" + "、".join(chans)
+        ok = True
+    else:
+        note = "装了，但还没配聊天平台"
+        ok = False
+
+    return {
+        "key": "atrium",
+        "label": "前台（atrium）",
+        # ⚠️ installed 直接用 ok（配全没有），不是"文件在不在"。
+        #
+        #    界面的红绿点只看 installed 这一个字段。
+        #    "装了但没配平台"跟"没装"一样干不了活 —— 就该是红的。
+        #    原来想用 _ok_extra 另开一个字段，界面不认，等于没做。
+        "installed": ok,
+        "version": "",
+        "why": "接飞书 / 钉钉，派活都从它进来",
+        "needed": True,
+        "can_install": False,
+        "note": note,
+    }
+
+
 def check_all() -> list[dict]:
-    """把清单里每一项都查一遍。"""
-    out = [check_python()]
+    """把清单里每一项都查一遍。
+
+    ## 顺序是有讲究的
+
+        一、Python        —— 地基
+        二、桥（本项目）    —— 这是咱们自己的东西，不应该埋在一堆 pip 包里
+        三、前台（atrium）  —— 接聊天平台的那一头
+        四、pip 包        —— 干各种活用的
+
+        原来只有 pip 包，看着像"包齐了就能用"，
+        其实少了桥和前台 —— 那两个才是真正让东西跑起来的。
+
+        （2026-11-05 老爸指出这一点。）
+    """
+    out = [check_python(), check_bridge(), check_atrium()]
 
     for d in DEPS:
         if d.get("is_python"):
@@ -156,121 +357,35 @@ def check_all() -> list[dict]:
             "note": "",
         })
 
-    # AstrBot 是单独的软件，检查一下在不在常见位置
-    out.append(_check_astrbot())
+    # ⚠️ 依赖检查里**不列 AstrBot**。
+    #
+    #    AstrBot 的对接代码在仓库里留着（desktop/launcher.py 那一套），
+    #    它**不是派活台的运行必需项** —— 派活台用 atrium 当前台。
+    #
+    #    要是列进依赖清单，界面上会永远挂一条
+    #    「AstrBot 未找到 · [选择…]」，用户会以为少装了个必需的东西。
+    #
+    #    实测（2026-11-05）：老爸在系统页看到它，
+    #    问"不是换成我们自己的桥了吗"。
     return out
 
 
-def _astrbot_paths_file() -> str:
-    """用户手动指定的 AstrBot 路径存在这。"""
-    return _userdirs.config_file("paths.json")
-
-
-def load_custom_paths() -> dict:
-    """读用户手动指定的路径。
-
-    ⚠️ 为什么要有这个：
-        自动探测只查了几个常见位置。装在别处的人，
-        界面上永远是"没找到"——而他明明装了。
-        所以得让用户自己指一下，指过就记住。
-    """
-    p = _astrbot_paths_file()
-    try:
-        with open(p, encoding="utf-8") as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_custom_path(key: str, path: str) -> None:
-    """记住用户指定的路径。"""
-    d = load_custom_paths()
-    if path:
-        d[key] = path
-    else:
-        d.pop(key, None)
-
-    p = _astrbot_paths_file()
-    try:
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, p)
-    except OSError:
-        pass
-
-
-def _check_astrbot() -> dict:
-    """找 AstrBot 装在哪。
-
-    它不一定跟我们同一个 Python 环境，所以不能 import。
-    先看用户指定的，再查几个常见位置。
-    """
-    custom = load_custom_paths().get("astrbot") or ""
-
-    # ⚠️ 不写死盘符。
-    #
-    #    原来候选里有 D:\qqaibot\astrbot 和 C:\astrbot ——
-    #    那是作者机器上的位置。别人换了盘、换了用户名就找不到。
-    #
-    #    现在的顺序：
-    #      一、用户自己配的（桌面端「路径配置」里的 astrbot_cwd）
-    #      二、环境变量 QQAIBOT_HOME
-    #      三、用户目录下几个通用位置
-    candidates = []
-    if custom:
-        candidates.append(custom)
-
-    _explicit = os.environ.get("QQAIBOT_HOME", "").strip()
-    if _explicit:
-        candidates.append(os.path.join(_explicit, "astrbot"))
-
-    candidates += [
-        os.path.expanduser(r"~\qqaibot\astrbot"),
-        os.path.expanduser(r"~\astrbot"),
-        os.path.expanduser(r"~\Downloads\astrbot"),
-        os.path.expandvars(r"%LOCALAPPDATA%\qqaibot\astrbot"),
-    ]
-
-    for p in candidates:
-        # 认两个特征文件，有一个就算装对了
-        looks_ok = (
-            os.path.isdir(p)
-            and (
-                os.path.exists(os.path.join(p, "main.py"))
-                or os.path.exists(os.path.join(p, "data"))
-            )
-        )
-        if looks_ok:
-            return {
-                "key": "astrbot",
-                "label": "AstrBot",
-                "installed": True,
-                "version": "",
-                "why": "前台（接 QQ / 飞书）",
-                "needed": False,
-                "can_install": False,
-                "can_pick": True,          # 可以自己选
-                "note": p,
-                "path": p,
-                "is_custom": p == custom,
-            }
-
-    return {
-        "key": "astrbot",
-        "label": "AstrBot",
-        "installed": False,
-        "version": "",
-        "why": "前台（接 QQ / 飞书）",
-        "needed": False,
-        "can_install": False,
-        "can_pick": True,              # 没找到也能自己指
-        "note": "没找到。装了的话点「选择…」指给我",
-        "path": "",
-        "is_custom": False,
-    }
+# ── AstrBot 的路径探测没有列进依赖清单 ──
+#
+# 这里原来有四个函数：
+#     _astrbot_paths_file   用户指定路径存哪
+#     load_custom_paths     读用户指定的路径
+#     save_custom_path      记住用户指定的路径
+#     _check_astrbot        在几个常见位置找 AstrBot 装没装
+#
+# 它们的作用是"在依赖页上显示 AstrBot 装没装"。
+# 派活台不用 AstrBot（前台在 atrium 项目里），
+# 所以这条检查删了 —— 留着只会挂一条永远「未找到」的条目。
+#
+# **AstrBot 的对接实现本身还在**（desktop/launcher.py / channels.py / svc_flow.py），
+# 那部分是另一回事，没动。
+#
+# （2026-11-05 删，老爸在系统页看见「AstrBot 未找到」问起来的。）
 
 
 def missing(items: list[dict]) -> list[dict]:

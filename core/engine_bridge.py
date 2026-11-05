@@ -148,6 +148,13 @@ def dispatch(task: str, task_id: str, workdir: str,
             base_url=cfg["base_url"],
             api_key=cfg["api_key"],
             model=cfg["model"],
+            # 算真实花销要用：这套配置的 id 和三档价
+            profile_id=cfg.get("id") or cfg.get("name") or "",
+            prices={
+                "price_in": cfg.get("price_in"),
+                "price_cached": cfg.get("price_cached"),
+                "price_out": cfg.get("price_out"),
+            },
         )
     except Exception as e:  # noqa: BLE001
         return {

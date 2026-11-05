@@ -68,11 +68,11 @@ class DepsPageMixin:
         lay.setContentsMargins(28, 24, 28, 22)
         lay.setSpacing(12)
 
-        # ── 标题 ──
+        # ── 标题（现在嵌在「系统」页里，降级成小节标题，别跟大标题抢）──
         head = QVBoxLayout()
         head.setSpacing(4)
-        h = QLabel("环境")
-        h.setFont(font(19, QFont.Bold))
+        h = QLabel("运行环境")
+        h.setFont(font(13, QFont.DemiBold))
         h.setStyleSheet(f"color:{C_TEXT};")
         sub = QLabel("跑起来需要什么，缺什么，这里都能看到。")
         sub.setFont(font(11))
@@ -160,7 +160,9 @@ class DepsPageMixin:
         try:
             from tools import deps as _deps
         except ImportError:
-            self.lbl_env.setText("读不到 deps 模块。检查一下 deps.py 在不在。")
+            lbl = getattr(self, "lbl_env", None)
+            if lbl:
+                lbl.setText("读不到 deps 模块。")
             return
 
         # 清空
@@ -172,7 +174,9 @@ class DepsPageMixin:
         self._dep_rows.clear()
 
         info = _deps.env_info()
-        self.lbl_env.setText(f"Python {info['python']}   ·   {info['platform']}")
+        lbl = getattr(self, "lbl_env", None)
+        if lbl:
+            lbl.setText(f"Python {info['python']}   ·   {info['platform']}")
 
         items = _deps.check_all()
 
@@ -191,139 +195,102 @@ class DepsPageMixin:
             self.deps_box.addWidget(row)
             self._dep_rows[it["key"]] = it
 
-        # 按钮
+        # 按钮（新系统页没有这个按钮，容错）
+        btn = getattr(self, "btn_install", None)
+        if not btn:
+            return
         miss = _deps.missing(items)
         if self._installing:
-            self.btn_install.setEnabled(False)
-            self.btn_install.setText("正在装…")
+            btn.setEnabled(False)
+            btn.setText("正在装…")
         elif miss:
-            self.btn_install.setEnabled(True)
-            self.btn_install.setText(f"装上缺的（{len(miss)} 个）")
+            btn.setEnabled(True)
+            btn.setText(f"装上缺的（{len(miss)} 个）")
         else:
-            # ⚠️ 都齐了也不能把按钮藏起来——
-            #    用户看不到这个按钮，就不知道有这个功能。
-            self.btn_install.setEnabled(False)
-            self.btn_install.setText("都齐了")
+            btn.setEnabled(False)
+            btn.setText("都齐了")
 
     def _make_dep_row(self, it: dict, _deps, name_w: int) -> QWidget:
-        """造一行。
+        """造一行。跟设计稿 table td 对齐：padding 10px，发丝线隔行。
 
-        排版目标：
-            ●  Python          3.12.10              必需
-            ●  python-docx     1.2.0                可选
-            ●  AstrBot         D:\\qqaibot\\astrbot  [选择…]  可选
-
-        三列对齐，中间那列吃掉多余宽度。
-        不逐个加边框——那样看着像被切开的几块。
+        排版：
+            [●绿pill] Python  3.12.10              [灰pill 必需]
+            [●琥珀pill] python-docx  未装          [小按钮 装它]
+            [●灰pill] AstrBot  未找到              [小按钮 选择…]
         """
         row = QWidget()
         rl = QHBoxLayout(row)
-        rl.setContentsMargins(2, 7, 2, 7)
-        rl.setSpacing(0)
+        rl.setContentsMargins(0, 10, 0, 10)
+        rl.setSpacing(10)
 
-        # ── 状态点 ──
+        # ── 状态点胶囊 ──
         dot = QLabel("●")
-        dot.setFont(font(9))
-        dot.setFixedWidth(16)
+        dot.setFixedSize(20, 20)
         dot.setAlignment(Qt.AlignCenter)
+        dot.setFont(font(9))
         if it["installed"]:
-            dot.setStyleSheet(f"color:{C_OK}; border:none;")
-        elif it.get("needed"):
-            dot.setStyleSheet(f"color:{C_BAD}; border:none;")
+            dot.setStyleSheet(
+                f"color:{C_OK}; background:rgba(95,198,126,.14);"
+                f"border-radius:10px; border:none;"
+            )
         else:
-            dot.setStyleSheet(f"color:{C_WARN}; border:none;")
+            dot.setStyleSheet(
+                f"color:{C_ACCENT}; background:rgba(224,168,60,.14);"
+                f"border-radius:10px; border:none;"
+            )
         rl.addWidget(dot)
 
-        # ── 名字（固定宽度，保证对齐）──
+        # ── 名字 + 版本（同一行，名字常规、版本加粗）──
         name = QLabel(it["label"])
-        name.setFont(font(11, QFont.Bold))
+        name.setFont(font(12.5))
         name.setStyleSheet(f"color:{C_TEXT}; border:none;")
-        name.setFixedWidth(name_w)
         rl.addWidget(name)
 
-        rl.addSpacing(12)
+        ver_text = it.get("version") or ""
+        if not ver_text:
+            ver_text = it.get("note") or it.get("why") or "未装"
+        ver = QLabel(ver_text)
+        ver.setFont(font(12.5, QFont.DemiBold))
+        ver.setStyleSheet(f"color:{C_TEXT2}; border:none;")
+        rl.addWidget(ver)
 
-        # ── 说明（吃掉剩余空间）──
-        desc_text = it.get("version") or ""
-        if not desc_text:
-            desc_text = it.get("note") or it.get("why") or ""
-        desc = QLabel(desc_text)
-        desc.setFont(font(10))
-        desc.setStyleSheet(f"color:{C_DIM}; border:none;")
-        desc.setWordWrap(False)
-        # 关键：设成 Expanding，让它真正吃掉中间的空间，
-        # 而不是每列各占一块、中间留着空洞。
-        desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        rl.addWidget(desc, 1)
+        rl.addStretch(1)
 
-        # ── 右边：按钮 + 标签 ──
-        right = QHBoxLayout()
-        right.setSpacing(6)
-
-        if it.get("can_pick"):
-            pick = QPushButton("选择…")
-            pick.setCursor(Qt.PointingHandCursor)
-            pick.setFixedHeight(24)
-            pick.setStyleSheet(
-                f"QPushButton{{color:{C_DIM}; background:transparent;"
-                f"border:1px solid {C_LINE}; border-radius:6px;"
-                f"padding:0 10px; font-size:11px;}}"
-                f"QPushButton:hover{{background:{C_LINE};}}"
-            )
-            key = it["key"]
-            pick.clicked.connect(lambda _=False, k=key: self._pick_dep_path(k))
-            right.addWidget(pick)
-
+        # ── 右边：按钮或灰胶囊标签 ──
+        # ⚠️ 原来这里有个「选择…」按钮，只在 can_pick=True 时出现。
+        #    全项目唯一会设 can_pick 的是 AstrBot 那条 ——
+        #    它已经删了，所以这个分支成了死代码。
+        #    留着的话：真点到会调 _pick_dep_path → save_custom_path（也删了）→ AttributeError。
         if not it["installed"] and it.get("can_install"):
             one = QPushButton("装它")
             one.setCursor(Qt.PointingHandCursor)
-            one.setFixedHeight(24)
+            one.setFixedHeight(26)
             one.setStyleSheet(
-                f"QPushButton{{color:{C_ACCENT}; background:transparent;"
-                f"border:1px solid {C_ACCENT}; border-radius:6px;"
-                f"padding:0 10px; font-size:11px;}}"
-                f"QPushButton:hover{{background:{C_ACCENT}; color:white;}}"
+                f"QPushButton{{color:{C_TEXT}; background:#22262e;"
+                f"border:1px solid #353b46; border-radius:7px;"
+                f"padding:0 12px; font-size:11.5px;}}"
+                f"QPushButton:hover{{background:#262b34;}}"
             )
             pip_name = it.get("pip") or it["label"]
             one.clicked.connect(
                 lambda _=False, pk=pip_name: self._install_one(pk)
             )
-            right.addWidget(one)
-
-        tag = QLabel("必需" if it.get("needed") else "可选")
-        tag.setFont(font(9))
-        tag.setAlignment(Qt.AlignCenter)
-        tag.setFixedWidth(34)
-        if it.get("needed"):
-            tag.setStyleSheet(
-                f"color:{C_DIM2}; border:1px solid {C_LINE};"
-                f"border-radius:4px; padding:1px 0;"
-            )
+            rl.addWidget(one)
         else:
+            tag = QLabel("必需" if it.get("needed") else "可选")
+            tag.setFont(font(10.5))
+            tag.setAlignment(Qt.AlignCenter)
             tag.setStyleSheet(
-                f"color:{C_DIM2}; border:1px solid {C_LINE};"
-                f"border-radius:4px; padding:1px 0;"
+                f"color:{C_DIM}; background:#262b33;"
+                f"border-radius:999px; padding:2px 10px; border:none;"
             )
-        right.addWidget(tag)
+            rl.addWidget(tag)
 
-        rl.addLayout(right)
         return row
 
-    def _pick_dep_path(self, key: str) -> None:
-        """让用户手动指一个目录。"""
-        try:
-            from tools import deps as _deps
-        except ImportError:
-            return
-
-        d = QFileDialog.getExistingDirectory(
-            self, "选择 AstrBot 的目录", ""
-        )
-        if not d:
-            return
-
-        _deps.save_custom_path(key, d)
-        self._refresh_deps()
+    # ⚠️ _pick_dep_path 已删：它只给 AstrBot 那条「选择…」用，
+    #    而 AstrBot 那条不在了，save_custom_path 也删了。
+    #    留着是个必崩的死方法。（2026-11-05）
 
     def _install_one(self, pip_name: str) -> None:
         """装单个包。"""

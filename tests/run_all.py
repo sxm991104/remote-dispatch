@@ -104,6 +104,7 @@ def main() -> int:
     # 按模块跑，这样能看到每个模块的统计
     modules = [
         ("路径安全", "tests/test_safe_path.py"),
+        ("配置目录", "tests/test_userdirs.py"),
         ("危险操作验证码", "tests/test_guard.py"),
         ("动作级守卫", "tests/test_action_guard.py"),
         ("实战 bug", "tests/test_field_bugs.py"),
@@ -125,6 +126,10 @@ def main() -> int:
         #    一点「环境」页就崩 —— 从 1.3.3 潜伏到现在。
         #    没有 PySide6 会 skip，CI 里装了所以会真跑。
         ("桌面端启动", "tests/test_desktop_boots.py"),
+    # ⚠️ 这个测的是"用户装完能不能用"：目录结构、模块 import、
+    #    八页全开、空配置、坏配置、引导文案、概览页有清单。
+    #    比单元测试慢（15 秒左右），但它抓的是"代码对但用户用不了"那类事故。
+    ("装完能用", "tests/test_install_e2e.py"),
     ]
 
     # ── workflow 的 bash 片段语法 ──

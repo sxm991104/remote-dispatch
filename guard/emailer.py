@@ -58,6 +58,33 @@ def send(subject: str, body: str,
             结果：用户填了 163 邮箱，点「发封测试邮件」，
             实际还在连旧的 —— 必然失败，而他以为是自己填错了。
     """
+    # ⚠️ **静默期在"发信"这一层也要拦一道。**
+    #
+    #    原来只在各自的 ensure_code() 里判静默 ——
+    #    那只管"要不要生成新码"。但发信这一步是分开的：
+    #
+    #        码可能早就生成好了（比如发码前一刻开的静默），
+    #        或者调用方手里拿着一个现成的码直接来发信。
+    #
+    #    这种情况下，ensure_code 那道判断**已经走过了**，
+    #    静默期间照样会把信发出去。
+    #
+    #    实测（2026-11-05）：老爸问"有没有漏掉发验证码的地方"，
+    #    扫出来两条走 emailer 的路
+    #    （auditor.py 审核端码、netauth.py 联网码），
+    #    它们只在生成码那层判了静默。
+    #
+    #    现在在最底层的发信口再判一次 —— 漏不掉。
+    try:
+        from guard import quiet as _q
+
+        if _q.is_quiet():
+            return True, (
+                f"现在是静默期（还有 {_q.remaining() // 60} 分钟），不发验证码。"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     # 延迟导入：guard 是重模块，这里不该在 import 期就拉起来
     if config is None:
         from guard import guard as _g

@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 
 from api import API
 from theme import (
-    C_ACCENT, C_ACCENT2, C_ACCENT3, C_BAD, C_BG, C_DIM, C_DIM2,
+    C_ACCENT, C_ACCENT2, C_ACCENT3, C_ACCENT_TXT, C_BAD, C_BG, C_DIM, C_DIM2,
     C_GRAD_A, C_GRAD_B, C_INPUT, C_LINE, C_LINE_HI, C_OK, C_RAISED,
     C_RUN, C_SURFACE, C_TEXT, C_TEXT2, C_WARN,
     STATUS_TEXT, _text_width, font, money, secs, status_color, toks,
@@ -73,46 +73,81 @@ class SettingsModelMixin:
         h.setStyleSheet(f"color:{C_TEXT};")
         cl.addWidget(h)
 
-        sub = QLabel("选一套就够。三套各有取舍 —— 没有「全都最好」的那一套。")
+        sub = QLabel("选一套就够，改了立刻生效，不用重启。")
         sub.setFont(font(11))
         sub.setStyleSheet(f"color:{C_DIM2};")
         sub.setWordWrap(True)
         cl.addWidget(sub)
 
+        # 分段控件：三个选项在一行（照设计稿）
+        #
+        # ⚠️ 这里必须给 QFrame 一个 objectName，并且样式里带上选择器。
+        #
+        #    原来写的是 seg.setStyleSheet("background:...; border:...")——
+        #    **没有选择器**的样式会套到这个 QFrame 的**所有子控件**上，
+        #    包括里面那三个 QPushButton。结果：
+        #        按钮自己的 chip:checked（黄色背景）被这层背景盖掉，
+        #        三个选项永远看着一样，选了哪个完全看不出来。
+        #
+        #    实测（2026-11-05）：按钮 isChecked() 是 True，
+        #    但截图量出来的像素还是 #121418（灰），不是 #e0a83c（黄）。
+        seg = QFrame()
+        seg.setObjectName("modeSeg")
+        seg.setStyleSheet(
+            f"QFrame#modeSeg {{ background:{C_INPUT};"
+            f" border:1px solid {C_LINE}; border-radius:10px; }}"
+        )
+        segrow = QHBoxLayout(seg)
+        segrow.setContentsMargins(4, 4, 4, 4)
+        segrow.setSpacing(4)
+
         self.mode_btns = {}
-
-        for key, title, desc in (
-            ("strict", "严格防护",
-             "动手之前先拦：词表、影子执行、审计员、验证码。"
-             "改了就是改了，退不回去。"),
-            ("rollback", "出事可回退",
-             "不拦、不要码、不审。命令直接在真机上跑，"
-             "出问题靠版本回退（Windows 用系统快照，Linux 用影子层）。"),
-            ("both", "全开",
-             "又拦又回退。最安全，也最慢。"),
+        for key, title in (
+            ("strict", "严格防护"),
+            ("rollback", "出事可回退"),
+            ("both", "全开"),
         ):
-            row = QHBoxLayout()
-            row.setSpacing(10)
-
             b = QPushButton(title)
+            # ⚠️ 不用全局的 #chip —— 那个依赖窗口级样式表，
+            #    而这里父控件也有样式，容易互相盖。
+            #    分段控件里的按钮单独一套 objectName，样式自己带全。
+            b.setObjectName("modeBtn")
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumWidth(110)
+            b.setMinimumHeight(30)
             b.clicked.connect(lambda _=False, k=key: self._set_security_mode(k))
-            row.addWidget(b, 0, Qt.AlignTop)
+            segrow.addWidget(b, 1)
             self.mode_btns[key] = b
+        cl.addWidget(seg)
 
-            lb = QLabel(desc)
-            lb.setFont(font(10.5))
-            lb.setStyleSheet(f"color:{C_DIM};")
-            lb.setWordWrap(True)
-            row.addWidget(lb, 1)
+        # 分段按钮的样式：选中 = 暖琥珀（跟全站"选中"一个颜色）
+        seg.setStyleSheet(
+            seg.styleSheet()
+            + f"""
+            QPushButton#modeBtn {{
+                background:transparent; border:1px solid transparent;
+                color:{C_DIM}; padding:6px 14px; border-radius:8px;
+                font-size:12.5px;
+            }}
+            QPushButton#modeBtn:hover {{
+                color:{C_TEXT2}; background:{C_SURFACE};
+            }}
+            QPushButton#modeBtn:checked {{
+                background:{C_ACCENT}; border-color:{C_ACCENT};
+                color:{C_ACCENT_TXT}; font-weight:600;
+            }}
+            QPushButton#modeBtn:checked:hover {{
+                background:{C_ACCENT2}; border-color:{C_ACCENT2};
+            }}
+            """
+        )
 
-            cl.addLayout(row)
-
-        self.lbl_mode_now = QLabel("")
+        self.lbl_mode_now = QLabel(
+            "严格 = 动手前先拦：词表、影子执行、审计员、验证码。"
+            "回退 = 不拦不码但每步留痕。全开 = 命令直接在真机跑，最省事也最危险。"
+        )
         self.lbl_mode_now.setFont(font(10.5))
-        self.lbl_mode_now.setStyleSheet(f"color:{C_DIM2};")
+        self.lbl_mode_now.setStyleSheet(f"color:{C_DIM};")
         self.lbl_mode_now.setWordWrap(True)
         cl.addWidget(self.lbl_mode_now)
 
@@ -127,8 +162,78 @@ class SettingsModelMixin:
             return
         mode = d.get("mode") or "strict"
 
+        # ── 先把三个按钮按"真实能力"标成可用/不可用 ──
+        #
+        # ⚠️ 为什么要这样：
+        #
+        #     老爸的原话（2026-11-05）：
+        #         「邮箱没填比如关闭，应该要跳到出事可回退；
+        #          如果影子执行、vss插件没有，有邮箱，那就只能走严格防护；
+        #          如果都没有设置，就给提示，都开不了，只有配置了才能开。」
+        #
+        #     让用户点一个**实际做不到**的模式，等于给他虚假的安全感 ——
+        #     以为有保护，其实没有。那还不如明说"现在没法开"。
+        caps = None
+        try:
+            from guard import capabilities as _cap
+
+            caps = _cap.capabilities()
+        except Exception:  # noqa: BLE001
+            caps = None
+
+        names = {"strict": "严格防护", "rollback": "出事可回退", "both": "全开"}
+
         for k, b in getattr(self, "mode_btns", {}).items():
             b.setChecked(k == mode)
+            if caps is None:
+                b.setEnabled(True)
+                b.setToolTip("")
+                continue
+
+            info = (caps.get("modes") or {}).get(k) or {}
+            ok = bool(info.get("ok"))
+            why = str(info.get("why") or "")
+
+            if ok:
+                b.setEnabled(True)
+                b.setToolTip("")
+                b.setStyleSheet("")
+                continue
+
+            # ⚠️ 已经选中的模式，条件不满足了 —— **不要假装它是好的。**
+            #
+            #    老爸实测（2026-11-05）：「我邮箱关了，还能切换到严格防护」。
+            #
+            #    为什么会这样：
+            #        第一次写的是"当前模式强制 setEnabled(True)"，
+            #        想着"用户已经选中了，禁用会让他不知道怎么办"。
+            #        结果按钮是亮的、文字说"现在是严格防护"，
+            #        但邮箱关着 —— 守卫拦下来根本发不出码，
+            #        人就被卡死在那个状态里出不来。
+            #
+            #    第二次改成"保持能点 + 标警告色"，还是不灵：
+            #        因为按钮此刻是 :checked，
+            #        `QPushButton#modeBtn:checked` 那条样式**优先于**
+            #        我单独设的 color —— 黄底还是黄底，一眼看不出有问题。
+            #
+            #    现在：**直接禁用**。
+            #        禁用之后 Qt 会走 :disabled 样式（灰掉），
+            #        一眼就知道"这个用不了"。
+            #        鼠标悬停仍然能看到原因（tooltip 在禁用控件上也显示）。
+            if k == mode:
+                b.setEnabled(False)
+                b.setToolTip(why)
+                # 用 :checked:disabled 把选中的黄底也压掉，
+                # 换成灰底 + 暗字，跟"不可用"一致。
+                b.setStyleSheet(
+                    f"QPushButton#modeBtn:checked:disabled {{"
+                    f" background:{C_INPUT}; border-color:{C_LINE};"
+                    f" color:{C_DIM}; font-weight:400; }}"
+                )
+            else:
+                b.setEnabled(False)
+                b.setToolTip(why)
+                b.setStyleSheet("")
 
         f = d.get("features") or {}
         on = []
@@ -143,12 +248,81 @@ class SettingsModelMixin:
         if f.get("rewind"):
             on.append("版本回退")
 
-        self.lbl_mode_now.setText(
+        line = (
             f"现在是「{d.get('label') or mode}」："
             f"{' + '.join(on) if on else '什么都不开'}"
         )
 
+        # ── 服务端自动换过模式的话，把原因原样带出来 ──
+        #
+        # ⚠️ 这一段是为了让用户知道"发生了什么"。
+        #
+        #    场景：他本来开着严格防护，后来把邮箱关了。
+        #        严格防护每拦一次都要发码，码发不出去 → 人卡死。
+        #
+        #    服务端读状态时会自动换成出事可回退，
+        #    并回一个 why_changed 说明原因。
+        #
+        #    这儿不解释的话，用户会看到"怎么突然变成出事可回退了"，
+        #    还以为有鬼。
+        why_changed = str(d.get("why_changed") or "").strip()
+        changed_from = str(d.get("changed_from") or "").strip()
+        no_usable = bool(d.get("no_usable_mode"))
+
+        if why_changed:
+            line += "\n" + ("⚠️ " if (changed_from or no_usable) else "") + why_changed
+
+        # ── 一个都开不了时，说清楚缺什么 ──
+        if caps is not None:
+            try:
+                from guard import capabilities as _cap
+
+                if not _cap.any_available(caps):
+                    line += (
+                        "\n⚠️ 现在一个模式都开不了："
+                        "上面「版本回退」没启用、下面验证码邮箱也没配。"
+                        "这两样至少得配一样。"
+                    )
+                else:
+                    blocked = [
+                        names[k] for k, v in (caps.get("modes") or {}).items()
+                        if not v.get("ok")
+                    ]
+                    if blocked:
+                        line += (
+                            f"\n（{'、'.join(blocked)}暂时选不了 —— "
+                            "悬停在那几个按钮上能看到缺什么。）"
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.lbl_mode_now.setText(line)
+
     def _set_security_mode(self, mode: str) -> None:
+        """切安全模式。
+
+        ⚠️ 切之前先查能力 —— 做不到的就不让切。
+
+            按钮那边已经 disabled 了，但 disabled 可能被绕过
+            （键盘、或者状态没刷新到），所以这里再拦一次。
+
+            服务端也会拦（/api/security/mode 里查 capabilities），
+            三层都拦一遍 —— 这种事宁可多拦。
+        """
+        try:
+            from guard import capabilities as _cap
+
+            caps = _cap.capabilities()
+            info = (caps.get("modes") or {}).get(mode) or {}
+            if not info.get("ok"):
+                why = info.get("why") or "现在开不了这个模式"
+                QMessageBox.warning(self, "安全模式", why)
+                self._load_security_mode()
+                return
+        except Exception:  # noqa: BLE001
+            # 查能力失败就不拦了，交给服务端判断
+            pass
+
         def done(data):
             if isinstance(data, dict) and data.get("ok"):
                 self._on_security_mode(data)
@@ -169,21 +343,31 @@ class SettingsModelMixin:
         #   上面是你的几套配置（每套一个服务商）
         #   点一行选中，下面填这一套的地址、Key、模型
         #   可以新增、删除、切换
+        # ── 卡 1：模型列表（设计稿里是独立的一张卡，新增按钮在右上角） ──
         card = QFrame()
         card.setObjectName("card")
         cl = QVBoxLayout(card)
         cl.setContentsMargins(20, 18, 20, 18)
         cl.setSpacing(9)
 
-        mh = QLabel("任务端用哪个模型")
+        # 标题 + 副标题在左，新增按钮在右，同一行
+        head = QHBoxLayout(); head.setSpacing(8)
+        hcol = QVBoxLayout(); hcol.setSpacing(0)
+        mh = QLabel("任务端模型")
         mh.setFont(font(13, QFont.DemiBold))
         mh.setStyleSheet(f"color:{C_TEXT};")
-        cl.addWidget(mh)
-
-        msub = QLabel("可以存好几套，随时切换。当前用的那套会标绿点。")
+        msub = QLabel("存好几套，随时切换。当前用的那套会标绿点。")
         msub.setFont(font(11))
         msub.setStyleSheet(f"color:{C_DIM2};")
-        cl.addWidget(msub)
+        hcol.addWidget(mh); hcol.addWidget(msub)
+        head.addLayout(hcol, 1)
+
+        self.btn_add_profile = QPushButton("＋ 新增模型")
+        self.btn_add_profile.setObjectName("primary")
+        self.btn_add_profile.setCursor(Qt.PointingHandCursor)
+        self.btn_add_profile.clicked.connect(self._add_profile)
+        head.addWidget(self.btn_add_profile, 0, Qt.AlignTop)
+        cl.addLayout(head)
 
         # 配置列表。
         #
@@ -192,86 +376,92 @@ class SettingsModelMixin:
         #    会作用到父容器身上，把别人的控件也删掉——
         #    实测报 "Internal C++ object already deleted"，
         #    整个设置页的输入框全废了。
-        self.profile_host = QWidget()
+        # ⚠️ **创建 QWidget 时就要给父控件。**
+        #
+        #    原来写的是 QWidget() —— 不带父控件，Qt 就把它当**独立顶层窗口**。
+        #    虽然下一行 addWidget 会把它收养进去，但在"创建"到"被收养"
+        #    之间的那几毫秒，屏幕上会闪出一个带系统标题栏
+        #    （最小化/最大化/关闭三个按钮）的小窗口。
+        #
+        #    （2026-11-05 老爸一直在问"为啥切到模型页会闪个小窗口"。
+        #      按住 20 张连拍、每 50ms 一张，才在第 3 张里抓到它。）
+        #
+        #    ⚠️ 不要用 setVisible(False) 来遮 ——
+        #        Qt 里显式隐藏过的子控件，父容器 show 时它也不会显示，
+        #        整个配置列表会直接消失。
+        #        正确做法是**创建时就把父窗口传进去**：
+        #        有父控件就从一开始不是顶层窗口，压根没机会闪。
+        self.profile_host = QWidget(card)
         self.profile_box = QVBoxLayout(self.profile_host)
         self.profile_box.setContentsMargins(0, 0, 0, 0)
         self.profile_box.setSpacing(4)
         cl.addWidget(self.profile_host)
+        lay.addWidget(card)
 
-        # 新增按钮
-        addrow = QHBoxLayout()
-        addrow.setSpacing(8)
-        self.btn_add_profile = QPushButton("＋ 新增模型")
-        self.btn_add_profile.setObjectName("ghost")
-        self.btn_add_profile.setCursor(Qt.PointingHandCursor)
-        self.btn_add_profile.clicked.connect(self._add_profile)
-        addrow.addWidget(self.btn_add_profile)
-        addrow.addStretch()
-        cl.addLayout(addrow)
+        # ── 卡 2：编辑区（设计稿里独立的"选一套来改"卡） ──
+        card2 = QFrame()
+        card2.setObjectName("card")
+        cl = QVBoxLayout(card2)
+        cl.setContentsMargins(20, 18, 20, 18)
+        cl.setSpacing(9)
 
-        # 分隔线
-        line = QFrame()
-        line.setFixedHeight(1)
-        line.setStyleSheet(f"background:{C_LINE};")
-        cl.addWidget(line)
-
-        # 编辑区
         self.edit_title = QLabel("选一套来改")
-        self.edit_title.setFont(font(11))
-        self.edit_title.setStyleSheet(f"color:{C_DIM2};")
+        self.edit_title.setFont(font(13, QFont.DemiBold))
+        self.edit_title.setStyleSheet(f"color:{C_TEXT};")
         cl.addWidget(self.edit_title)
 
-        def field2(label: str, placeholder: str, secret: bool = False):
-            lb = QLabel(label)
-            lb.setFont(font(11))
-            lb.setStyleSheet(f"color:{C_DIM2};")
-            cl.addWidget(lb)
-            ed = QLineEdit()
-            ed.setMinimumHeight(36)
-            ed.setPlaceholderText(placeholder)
-            if secret:
-                ed.setEchoMode(QLineEdit.Password)
-            cl.addWidget(ed)
-            return ed
+        # 接口地址 + 模型名 并排（照设计稿）
+        toprow = QHBoxLayout()
+        toprow.setSpacing(12)
 
-        self.ed_base = field2("接口地址", "https://api.openai.com")
-        self.ed_key = field2("API Key", "留空表示不改", secret=True)
-        # 填完 Key 自动拉一次模型——不用再点"测试连接"。
-        # 这是给"新增模型"用的：先输了地址，再输 Key，
-        # 输完 Key 的那一刻模型列表就该出来。
+        base_col = QVBoxLayout(); base_col.setSpacing(5)
+        lb_base = QLabel("接口地址")
+        lb_base.setFont(font(11)); lb_base.setStyleSheet(f"color:{C_DIM2};")
+        base_col.addWidget(lb_base)
+        self.ed_base = QLineEdit()
+        self.ed_base.setMinimumHeight(36)
+        self.ed_base.setPlaceholderText("https://api.openai.com")
+        base_col.addWidget(self.ed_base)
+        toprow.addLayout(base_col, 1)
+
+        model_col = QVBoxLayout(); model_col.setSpacing(5)
+        lbl_model = QLabel("模型名")
+        lbl_model.setFont(font(11)); lbl_model.setStyleSheet(f"color:{C_DIM2};")
+        model_col.addWidget(lbl_model)
+        self.cmb_engine_model = QComboBox()
+        self.cmb_engine_model.setEditable(False)
+        self.cmb_engine_model.setMinimumHeight(36)
+        self.cmb_engine_model.setCursor(Qt.PointingHandCursor)
+        model_col.addWidget(self.cmb_engine_model)
+        toprow.addLayout(model_col, 1)
+
+        cl.addLayout(toprow)
+
+        # API Key（整行）
+        lb_key = QLabel("API Key")
+        lb_key.setFont(font(11)); lb_key.setStyleSheet(f"color:{C_DIM2};")
+        cl.addWidget(lb_key)
+        self.ed_key = QLineEdit()
+        self.ed_key.setMinimumHeight(36)
+        self.ed_key.setPlaceholderText("留空表示不改")
+        self.ed_key.setEchoMode(QLineEdit.Password)
+        # 填完 Key 自动拉一次模型，不用再点"测试连接"。
         self.ed_key.editingFinished.connect(
             lambda: self._fetch_models(silent=True)
         )
+        cl.addWidget(self.ed_key)
 
         self.lbl_key_state = QLabel("")
         self.lbl_key_state.setFont(font(10.5))
         self.lbl_key_state.setStyleSheet(f"color:{C_DIM2};")
         cl.addWidget(self.lbl_key_state)
 
-        lbl_model = QLabel("模型名")
-        lbl_model.setFont(font(11))
-        lbl_model.setStyleSheet(f"color:{C_DIM2};")
-        cl.addWidget(lbl_model)
-
-        # ⚠️ 不可编辑——这是"下拉框"，不是"输入框"。
-        #
-        #    setEditable(True) 那个版本长得跟输入框一模一样，
-        #    用户看不出这里有列表可选，只能盲打（打错一个字母就 404）。
-        #
-        #    现在：点一下就是列表，选项是接口返回的真实模型。
-        #    真要填列表里没有的（自建 / 代理），点最后一项「手动输入…」。
-        self.cmb_engine_model = QComboBox()
-        self.cmb_engine_model.setEditable(False)
-        self.cmb_engine_model.setMinimumHeight(36)
-        self.cmb_engine_model.setCursor(Qt.PointingHandCursor)
-        cl.addWidget(self.cmb_engine_model)
-
         # 快速填：只在「新增模型」时出现。
         #
         # 为什么点已有模型时不显示：
         #     那套的地址和模型早就填好了，
         #     旁边还摆一排"一键填某家"的按钮，纯属干扰。
-        self.quick_row_host = QWidget()
+        self.quick_row_host = QWidget(card2)
         quick = QHBoxLayout(self.quick_row_host)
         quick.setContentsMargins(0, 0, 0, 0)
         quick.setSpacing(8)
@@ -309,7 +499,7 @@ class SettingsModelMixin:
         cl.addWidget(self.quick_row_host)
 
         # 操作按钮：同样只在「新增模型」时出现。
-        self.action_row_host = QWidget()
+        self.action_row_host = QWidget(card2)
         arow2 = QHBoxLayout(self.action_row_host)
         arow2.setContentsMargins(0, 0, 0, 0)
         arow2.setSpacing(8)
@@ -329,7 +519,23 @@ class SettingsModelMixin:
         # 「删除这套」拿掉了——上面每一行已经有「删」按钮，
         # 这里再放一个，等于同一个动作两个入口。
         # 保留一个属性名，别的地方还在用（禁用/启用的状态控制）。
-        self.btn_del_profile = QPushButton("删除这套")
+        #
+        # ⚠️ **创建时就要给父窗口。**
+        #
+        #    原来写的是：
+        #        self.btn_del_profile = QPushButton("删除这套")
+        #        self.btn_del_profile.hide()
+        #
+        #    QPushButton() 不带父控件 = **独立顶层窗口**，
+        #    而且 Qt 给无父控件的是默认 640x480。
+        #    在这两行之间那一瞬间，屏幕上会闪出一个 640x480 的
+        #    带系统标题栏的窗口。
+        #
+        #    （2026-11-05 老爸反复问"切到模型页为啥闪个小窗口"。
+        #      用 app.topLevelWidgets() 一查抓到的：
+        #        QPushButton 640x480 可见=False
+        #      640x480 正是无父控件的默认尺寸，一对就对上了。）
+        self.btn_del_profile = QPushButton("删除这套", card2)
         self.btn_del_profile.hide()
 
         self.lbl_engine = QLabel("")
@@ -344,16 +550,8 @@ class SettingsModelMixin:
         self.lbl_engine_now.setStyleSheet(f"color:{C_DIM2};")
         cl.addWidget(self.lbl_engine_now)
 
-        # ⚠️ 一定要把 card 加进 lay。
-        #
-        #    漏了这一句的后果很隐蔽：card 建出来了、控件也塞进去了，
-        #    但没有任何人引用它，Qt 的垃圾回收会把它连带子控件一起销毁。
-        #    表现是 self.ed_base 指向一个已经死掉的 C++ 对象，
-        #    一碰就报 "Internal C++ object already deleted"。
-        #
-        #    这个 bug 查了很久：先怀疑是重复创建、再怀疑是 layout 嵌套，
-        #    最后才发现就是少了一行 addWidget。
-        lay.addWidget(card)
+        # 卡 2（编辑区）加进 lay。卡 1 已经在前面加过了。
+        lay.addWidget(card2)
 
 
     def _load_engine(self) -> None:
@@ -604,9 +802,24 @@ class SettingsModelMixin:
                 body["api_key"] = api_key
 
         def done(data):
+            # ⚠️ 不管成功失败，**立刻清空 Key 框**。
+            #
+            #    跟审计员那张卡一个道理（2026-11-05 老爸抓到的那次）：
+            #        原来只有"保存成功"才 clear()。
+            #        保存失败 / 请求超时 → Key 一直留在框里。
+            #
+            #    虽然 EchoMode.Password 挡住字形，但框里的内容还是明文，
+            #    Ctrl+A / Ctrl+C 一复制就拿到完整 Key。
+            #
+            #    用户按「保存」那一刻，Key 已经赋给 body 了，留在界面上
+            #    只有泄露风险，没有任何好处。
+            try:
+                self.ed_key.clear()
+            except Exception:  # noqa: BLE001
+                pass
+
             if isinstance(data, dict) and data.get("ok"):
                 self.lbl_engine.setText("已保存")
-                self.ed_key.clear()
                 self._is_adding = False
                 self._set_new_mode(False)
                 # 记下刚建的那套，免得刷新时挑错
@@ -659,7 +872,8 @@ class SettingsModelMixin:
 
     def _fill_editor(self, prof: dict) -> None:
         """把某一套填进下面的编辑区。"""
-        self.edit_title.setText(f"改「{prof.get('name')}」")
+        # 标题保持设计稿的「选一套来改」，不随选中项变（选中项在上面列表里高亮）。
+        self.edit_title.setText("选一套来改")
         self.ed_base.setText(prof.get("base_url") or "")
         self._set_model_text(prof.get("model") or "")
 

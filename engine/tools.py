@@ -1928,6 +1928,25 @@ def execute(name: str, arguments: str) -> str:
         # 跟 _blocked() 里那个保守方向一致：守卫挂了不等于安全。
         return f"[拦下了] 动作守卫出错（{type(e).__name__}），这条不放行。"
 
+    # ── 记下这次要碰哪些文件（改动账本）──
+    #
+    # ⚠️ 放在"真正调用"之前，不是之后。
+    #
+    #    之后记的话，工具如果中途崩了，账本里就没有这一笔 ——
+    #    而那恰恰是最需要知道"它动了啥"的时候。
+    #
+    #    记的是"要碰哪些路径"，不是"内容"。内容不用我们存：
+    #    Windows 的系统卷影副本本来就有，guard/history.py 能读出来。
+    #
+    #    （2026-11-05 老爸定的：我们只接插件、给对比，不帮用户回退。）
+    try:
+        from guard import changelog as _cl
+
+        _cl.record(str(args.get("_task") or ""), name, args)
+    except Exception:  # noqa: BLE001
+        # 记账失败不能挡住正事
+        pass
+
     try:
         return str(fn(**args))
     except TypeError as e:
