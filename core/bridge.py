@@ -1550,10 +1550,80 @@ def notify_outbox(task_id: str, rec: dict, task_text: str = "") -> None:
             "files_skipped": skipped,
             "delivered": False,
         }
+
+        # ── 外传拦截：推送这一关 ──
+        #
+        # 题目：东西往外走只有一个真出口 —— **推回聊天窗口**。
+        #
+        #    沙盒里跑 curl 的时候，网络是掐掉的（netguard 用 WFP+
+        #    Sandboxie 管着），发不出去。真正的出口是这里：
+        #    任务干完了，把结果和产出的文件推回聊天窗口。
+        #
+        #    所以外传扫描就挂在推送前。
+        #
+        #    扫什么：任务原文 + 结果 + 报错。
+        #    扫不到就照常推；扫到了**不删内容**，只打标记 ——
+        #    删了用户就不知道发生了什么，反而更糟。
+        #
+        #    关掉的时候（出事可回退那一档）整段跳过。
+        try:
+            exfil_hits = _scan_exfil(note)
+            if exfil_hits:
+                note["exfil"] = exfil_hits
+        except Exception as e:  # noqa: BLE001
+            # ⚠️ 扫描出错就当没扫到，照常推。
+            #    这是个辅助检查，不能因为它挂了就把通知卡死。
+            _log_quiet(f"外传扫描失败: {type(e).__name__}: {e}")
+
         with open(OUTBOX, "a", encoding="utf-8") as f:
             f.write(json.dumps(note, ensure_ascii=False) + "\n")
     except OSError:
         pass
+
+
+def _scan_exfil(note: dict) -> list[dict]:
+    """推送前扫一遍：要送回去的内容里，有没有往外传的痕迹。
+
+    ⚠️ 只在开了外传拦截的模式下才扫。
+       出事可回退那一档整个不做拦截（它只靠回退）。
+
+    ⚠️ 扫描失败不抛异常 —— 返回空列表，调用方当没扫到。
+    """
+    try:
+        from guard import security_mode as _sm
+
+        if not (_sm.features() or {}).get("exfil"):
+            return []
+    except Exception:  # noqa: BLE001
+        # 判断不了模式就当没开，别卡住推送
+        return []
+
+    text = "\n".join([
+        str(note.get("task") or ""),
+        str(note.get("result") or ""),
+        str(note.get("error") or ""),
+    ])
+    if not text.strip():
+        return []
+
+    # 用户自己的邮箱不算外传目标
+    own: list[str] = []
+    try:
+        from guard import guard as _g
+
+        cfg = _g.load_config() if hasattr(_g, "load_config") else {}
+        own = [str(cfg.get("email") or "")]
+        if cfg.get("smtp_user"):
+            own.append(str(cfg.get("smtp_user")))
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from guard import exfil as _exfil
+
+        return _exfil.scan(text, own_emails=[e for e in own if e]) or []
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def read_asks(limit: int = 5) -> list[dict]:

@@ -109,6 +109,9 @@ def main() -> int:
         ("动作级守卫", "tests/test_action_guard.py"),
         ("实战 bug", "tests/test_field_bugs.py"),
         ("接口安全", "tests/test_security.py"),
+    # ⚠️ 外传拦截：两个检查点（联网时拦命令、断网时拦推送），
+    #    任何一处漏了东西就出去了。
+    ("外传拦截", "tests/test_exfil.py"),
         ("引擎核心", "tests/test_engine.py"),
         ("并发与调度", "tests/test_concurrency.py"),
         ("产出文件", "tests/test_outputs.py"),

@@ -36,6 +36,15 @@ import stat
 import subprocess
 import sys
 
+# ⚠️ 外传拦截抛的异常，要能在这里接住。
+#
+#    接不住的话它会掉进 `except Exception: return None`，
+#    而 None 的意思是"沙箱用不了，退回普通执行"——
+#    于是命令绕过拦截在真机上跑了一遍。
+#
+#    所以这个 import 不能省，也不能写成延迟 import。
+from guard.sandbox import SandboxBlocked
+
 # 单个文件读多少就算太大。超过这个数只给开头和结尾，
 # 免得一次把上下文塞满。
 MAX_READ_BYTES = 200_000
@@ -1283,7 +1292,6 @@ def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
             raise
         except Exception:  # noqa: BLE001
             return None
-
         if p is None:
             return None
 
@@ -1332,6 +1340,15 @@ def _run_in_sandbox_if_possible(command: str, work_dir: str, env: dict,
         # ⚠️ 超时 ≠ 沙箱不可用。
         #    原来这里 `except Exception: return None`，
         #    调用方看到 None 就用普通方式再跑一遍 —— 时间翻倍。
+        raise
+    except SandboxBlocked:
+        # ⚠️ 被外传拦截拦下了 —— **一定要往外抛，不能 return None**。
+        #
+        #    return None 的意思是"沙箱用不了，你退回普通方式跑吧"，
+        #    调用方真的会退回去 —— 于是这条命令绕过拦截，
+        #    在真机上原样跑一遍。那这一关等于白设。
+        #
+        #    实测（2026-11-06）设计时确认：这是唯一会让拦截失效的写法。
         raise
     except Exception:  # noqa: BLE001
         return None
@@ -1550,6 +1567,12 @@ def run_command(command: str, cwd: str = "", timeout: int = 120) -> str:
             # 影子里跑超时了 —— 不要再跑一遍。
             # 重跑的话用户说 3 秒实际等 10 秒，而且命令可能又改一遍文件。
             return _timeout_msg(command, timeout)
+        except SandboxBlocked as e:
+            # ⚠️ 被外传拦截拦下 —— **就地给用户回话，绝不退回普通执行**。
+            #
+            #    走下面 r is None 那条路的话，会退回联网的裸跑，
+            #    命令就真发出去了。拦截等于没设。
+            return f"【外传拦截】{e}"
 
         if r is None:
             # None 才是"影子执行不可用"。

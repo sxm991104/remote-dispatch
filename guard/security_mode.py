@@ -60,6 +60,7 @@ DEFAULT = MODE_STRICT
 #   guard   要不要动作守卫
 #   audit   要不要审计员
 #   code    要不要验证码
+#   exfil   要不要外传拦截
 #   rewind  要不要版本回退
 FEATURES = {
     MODE_STRICT: {
@@ -67,6 +68,7 @@ FEATURES = {
         "guard": True,
         "audit": True,
         "code": True,
+        "exfil": True,
         "rewind": False,
     },
     MODE_ROLLBACK: {
@@ -75,6 +77,11 @@ FEATURES = {
         "guard": False,
         "audit": False,
         "code": False,
+        # ⚠️ 这一档**不做外传拦截**。
+        #
+        #    它整个思路就是"不拦不审不要码，出事了退回去"。
+        #    加一道拦截就自相矛盾了。
+        "exfil": False,
         "rewind": True,
     },
     MODE_BOTH: {
@@ -82,6 +89,7 @@ FEATURES = {
         "guard": True,
         "audit": True,
         "code": True,
+        "exfil": True,
         "rewind": True,
     },
 }

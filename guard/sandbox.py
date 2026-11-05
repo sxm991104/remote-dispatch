@@ -37,6 +37,73 @@ import subprocess
 import sys
 import time
 
+
+class SandboxBlocked(RuntimeError):
+    """命令没跑 —— 在跑之前被拦下来了。
+
+    调用方（engine/tools.py）要把它当成"这条命令没执行"，
+    而不是"执行失败"。两者对用户的意思不一样：
+        没执行 → 什么都没发生，可以商量
+        失败   → 可能跑了一半，要去查
+    """
+
+
+def _exfil_block_reason(command: str) -> str:
+    """联网时，这条命令会不会把东西往外送？会的话返回一句人话。
+
+    ⚠️ 只在**联网 + 开了外传拦截**时才有意义。
+       断网时沙盒根本发不出去，扫了也是白扫 —— 那件事交给
+       推送那一关（core/bridge.py 的 _scan_exfil）。
+
+    ⚠️ 扫描出错 → 返回空串（放行）。
+       这是个辅助检查，不能因为它挂了就把功能卡死。
+    """
+    try:
+        from guard import netpolicy as _np
+
+        granted, _left = _np.granted()
+        if not granted:
+            # 没联网 → 沙盒出不去，不需要在这里拦
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+    try:
+        from guard import security_mode as _sm
+
+        if not (_sm.features() or {}).get("exfil"):
+            return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+    try:
+        from guard import exfil as _exfil
+
+        hits = _exfil.scan(command or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+    if not hits:
+        return ""
+
+    # 只报外传那几类，别把普通 url 当理由
+    real = [
+        h for h in hits
+        if h.get("kind") in ("http_upload", "protocol", "upload_host")
+    ]
+    if not real:
+        return ""
+
+    first = real[0]
+    return (
+        "这条命令会把数据往外送，被外传拦截拦下了，没有执行：\n"
+        f"  {first.get('hit')}\n"
+        f"  {first.get('why')}\n"
+        "\n"
+        "现在沙盒是**联网**状态，命令真能发出去。\n"
+        "确实要发的话，跟用户说清楚发什么、发给谁，让他自己决定。"
+    )
+
 # Sandboxie 的默认安装位置。用户装到别处也能找到——
 # 下面 _find_install() 会去注册表问。
 _DEFAULT_DIRS = (
@@ -504,6 +571,22 @@ def run_in_box(
         f'"{start}" /box:{BOX_NAME} /hide_window /wait '
         f'cmd.exe /c "{esc}"'
     )
+
+    # ── 联网时的外传拦截：命令跑之前先看一眼 ──
+    #
+    # ⚠️ 为什么放在这里、而不是"一直扫"：
+    #
+    #    沙盒默认是**断网**的（netguard 用 WFP + Sandboxie 掐着）。
+    #    断网时跑 curl 也发不出去 —— 那时候扫命令没意义，
+    #    真正的出口在"沙盒出来、推回聊天窗口"那一步（core/bridge.py）。
+    #
+    #    但用户**授权联网**之后就不一样了：命令真能往外发。
+    #    所以这一关只在联网时生效。
+    #
+    #    两处检查点，按联网状态切换 —— 谁真能出去，就查那一头。
+    blocked = _exfil_block_reason(command)
+    if blocked:
+        raise SandboxBlocked(blocked)
 
     try:
         p = subprocess.run(

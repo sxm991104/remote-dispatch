@@ -143,8 +143,9 @@ class SettingsModelMixin:
         )
 
         self.lbl_mode_now = QLabel(
-            "严格 = 动手前先拦：词表、影子执行、审计员、验证码。"
-            "回退 = 不拦不码但每步留痕。全开 = 命令直接在真机跑，最省事也最危险。"
+            "严格 = 动手前先拦：动作守卫、影子执行、审计员、验证码、外传拦截。"
+            "回退 = 不拦不码不要码，只做版本回退。"
+            "全开 = 严格那几样全要，再加上回退。"
         )
         self.lbl_mode_now.setFont(font(10.5))
         self.lbl_mode_now.setStyleSheet(f"color:{C_DIM};")
@@ -245,6 +246,8 @@ class SettingsModelMixin:
             on.append("审计员")
         if f.get("code"):
             on.append("验证码")
+        if f.get("exfil"):
+            on.append("外传拦截")
         if f.get("rewind"):
             on.append("版本回退")
 
