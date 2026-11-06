@@ -112,6 +112,9 @@ def main() -> int:
     # ⚠️ 外传拦截：两个检查点（联网时拦命令、断网时拦推送），
     #    任何一处漏了东西就出去了。
     ("外传拦截", "tests/test_exfil.py"),
+    # ⚠️ 写文件走影子：防护不再只挂在进程上。
+    #    写入也要经过 classify_changes + auditor，跟 run_command 一条路。
+    ("写入走影子", "tests/test_write_shadow.py"),
         ("引擎核心", "tests/test_engine.py"),
         ("并发与调度", "tests/test_concurrency.py"),
         ("产出文件", "tests/test_outputs.py"),

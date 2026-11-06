@@ -45,6 +45,24 @@ import sys
 #    所以这个 import 不能省，也不能写成延迟 import。
 from guard.sandbox import SandboxBlocked
 
+
+def _debug(msg: str) -> None:
+    """调试日志。写不出去就丢掉 —— 不许因为它挂了把正事带崩。
+
+    ⚠️ 工具层没有"给用户看的日志"：模型看到的只有工具返回值。
+       这里只留给"降级了"这类要知道但不该打断流程的事
+       （比如写文件时影子层不可用、退回真机直写）。
+
+    ⚠️ 为什么写 stderr 而不是文件：
+        工具的进程是 pythonw 起的（没控制台），stderr 会被丢弃。
+        但这正是想要的效果 —— 不打扰用户、不占磁盘、
+        有人在控制台里跑调试时又能看见。
+    """
+    try:
+        print(f"[tools] {msg}", file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass
+
 # 单个文件读多少就算太大。超过这个数只给开头和结尾，
 # 免得一次把上下文塞满。
 MAX_READ_BYTES = 200_000
@@ -476,15 +494,147 @@ def read_file(path: str, offset: int = 1, limit: int = 0) -> str:
     return head + body
 
 
-def write_file(path: str, content: str) -> str:
-    p = _resolve(path)
+def _write_content(p: str, content: str) -> str:
+    """把内容写进 p —— **优先走影子层**。
+
+    ⚠️ 这是 write_file / edit_file 唯一的落地出口。
+       所有写文件都必须从这里过，不许再各写各的 open().write()。
+
+    ## 为什么要绕这一道
+
+        原来这两个工具是在 Python 进程里 open().write()：
+
+            写文件的进程在沙盒**外面**
+                ↓
+            Sandboxie 按进程隔离，包不住它
+                ↓
+            classify_changes 抓不到
+                ↓
+            auditor.review 收不到 diff
+                ↓
+            **两道闸全绕过了，只剩路径检查**
+
+        而危险不在"写了什么"，在"这个文件本身能不能执行"：
+
+            开机自启目录             下次开机就跑
+            .git/hooks/post-commit   下次 commit 就跑
+            计划任务 XML / 注册表导入文件
+            guard/guard.json         关掉验证码
+
+        路径检查放行、内容不看 —— 这些全都能写进去。
+
+        （2026-11-06 辩论里被指出来：防护挂在进程上、危险挂在文件上。）
+
+    ## 现在的做法
+
+        让**沙盒里的进程**去写（sandbox.write_in_box），
+        然后走跟 run_command 一模一样的收尾：
+
+            snapshot → 写 → apply_after_run（审核 + 回写）→ 清影子
+
+        沙盒不可用时退回真机直写 —— 那是正常的降级，
+        跟 run_command 那边一致（没装沙盒就一直直跑）。
+
+    ## ⚠️ 审核没过怎么办
+
+        apply_after_run 会把改动扣住不回写。
+        这里如实告诉模型"写了但被扣住了"，不能假装成功 ——
+        它以为写完了、接着往下干，后面全错。
+    """
     parent = os.path.dirname(os.path.abspath(p))
     try:
         os.makedirs(parent, exist_ok=True)
+    except OSError as e:
+        return f"写不了：{e}"
+
+    # ── 先试影子层 ──
+    boxed = False
+    try:
+        from guard import sandbox as _sb
+
+        if _sb.available():
+            base = _sb.snapshot()
+            ok, why = _sb.write_in_box(p, content)
+            if ok:
+                import time as _t
+
+                _t.sleep(0.4)   # 影子落盘有一点点延迟
+                res = _sb.apply_after_run(baseline=base)
+                recovered = res.get("recovered") or []
+                denied = res.get("denied") or []
+                audit = res.get("audit") or {}
+                _sb.clean_written_shadows(baseline=base)
+
+                # ⚠️ 判"写没写成"只看**目标文件有没有回写**，
+                #    不能看 denied 空不空。
+                #
+                #    实测（2026-11-06）：为了在沙盒里跑写入，
+                #    我往 TEMP 放了一个 .py 给沙盒用。
+                #    那也算影子里的一个新文件，回写时会被判
+                #    「workspace 权限范围外」→ 进 denied。
+                #
+                #    于是：目标文件明明写成功了，
+                #    denied 里有那条临时脚本 → 误报"没落到真机"。
+                #
+                #    自己造的工具文件不该影响对结果的判断。
+                wrote = any(
+                    os.path.normcase(str(x)) == os.path.normcase(str(p))
+                    for x in recovered
+                )
+                if not wrote:
+                    why2 = ""
+                    if audit and audit.get("verdict") == "block":
+                        why2 = "；".join(audit.get("reasons") or [])
+                    else:
+                        for it in denied:
+                            if isinstance(it, (list, tuple)) and len(it) >= 2:
+                                if os.path.normcase(str(it[0])) == os.path.normcase(str(p)):
+                                    why2 = str(it[1])
+                                    break
+                        if not why2:
+                            for it in (res.get("failed") or []):
+                                if isinstance(it, (list, tuple)) and len(it) >= 2:
+                                    if os.path.normcase(str(it[0])) == os.path.normcase(str(p)):
+                                        why2 = str(it[1])
+                                        break
+                    return (
+                        "写是写了，但**没落到真机**。\n"
+                        f"路径：{p}\n"
+                        + (f"原因：{why2}\n" if why2 else "")
+                        + "别当它已经写好了。告诉用户这件事。"
+                    )
+
+                # 目标写成了 —— 收工，不要再直写一遍
+                return ""
+            else:
+                _debug(f"写文件走影子失败，退回直写：{why}")
+    except ImportError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        _debug(f"写文件走影子出错，退回直写：{type(e).__name__}: {e}")
+
+    # ── 影子不可用：退回落真机 ──
+    #
+    # ⚠️ 走到这里只有两种情况：
+    #    一、影子层根本不可用（没装 Sandboxie）
+    #    二、影子层跑出来了，但目标文件没收进 recovered
+    #        上面已经 return 了，不会到这里。
+    #
+    #    第一种是正常的降级 —— 跟 run_command 那边一致：
+    #    没装沙盒就一直直跑。用户选的就是"没这层防护"。
+    try:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
     except OSError as e:
         return f"写不了：{e}"
+    return ""
+
+
+def write_file(path: str, content: str) -> str:
+    p = _resolve(path)
+    err = _write_content(p, content)
+    if err:
+        return err
     return f"已写入 {p}（{len(content)} 字符）"
 
 
@@ -513,11 +663,9 @@ def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
         )
 
     updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-    try:
-        with open(p, "w", encoding="utf-8", newline="\n") as f:
-            f.write(updated)
-    except OSError as e:
-        return f"写不了：{e}"
+    err = _write_content(p, updated)
+    if err:
+        return err
 
     hit = n if replace_all else 1
     return f"已改 {p}（替换了 {hit} 处）"

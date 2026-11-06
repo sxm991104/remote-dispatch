@@ -1156,3 +1156,136 @@ def commit_deferred(paths: list[str]) -> list[tuple[str, bool]]:
         out.append((p, ok))
 
     return out
+
+
+# ══════════════════════════════════════════════════════
+# 写文件也走影子
+# ══════════════════════════════════════════════════════
+#
+# ## 为什么必须补上
+#
+#     write_file / edit_file 原来是在 **Python 进程里** open().write()：
+#
+#         写文件的那个进程在沙盒外面
+#             ↓
+#         Sandboxie 的隔离按进程做，包不住它
+#             ↓
+#         classify_changes 抓不到
+#             ↓
+#         auditor.review 收不到 diff
+#             ↓
+#         **两道闸全绕过了，唯一关卡只剩路径检查**
+#
+#     危险不在"写了什么内容"，在"文件本身能执行"：
+#
+#         开机自启目录           下次开机就跑
+#         .git/hooks/post-commit 下次 commit 就跑
+#         计划任务 XML / 注册表导入文件
+#         guard/guard.json       关掉验证码
+#
+#     路径检查放行、内容不看 —— 这些全都能写进去。
+#
+#     （2026-11-06 辩论里被指出来：防护挂在进程上、危险挂在文件上。）
+#
+# ## 怎么补：不是"把 Python 进程塞进沙盒"，是**让沙盒里的进程去写**
+#
+#     隔离是按进程做的，那换个进程写就是了：
+#
+#         ① 把「路径 + 内容」编码成一个 .py，放进影子目录
+#         ② 在沙盒里跑那个 .py（它只干一件事：写目标文件）
+#         ③ classify_changes 照常抓，apply_after_run 照常审、照常回写
+#
+#     实测（2026-11-06）验证过：沙盒里的进程改真机文件，
+#     真机没变、影子变了、classify_changes 抓得到 modifies、
+#     影子文件里读得到新内容。
+#
+# ## 为什么内容用 base64
+#
+#     内容里可能有中文、引号、换行、反斜杠、%变量%、$变量%。
+#     要塞进 cmd 再塞进 .bat，每层都要转义，漏一层就坏。
+#
+#     base64 是纯 ASCII —— 怎么塞都不会坏。沙盒里解码一次就行。
+
+
+# 沙盒里执行"写文件"的小脚本。
+#
+# ⚠️ 用 ASCII 写，不用中文 —— 这个文件要先经过 cmd 传进去，
+#    加载器那一头是 GBK，混着来迟早出事。注释也用英文。
+#
+# ⚠️ 内容**直接嵌进脚本**，不走命令行参数。
+#
+#    原因：Windows 命令行上限 32767 字符。
+#    一个 100KB 的文件 base64 之后 137KB，塞不进去。
+#
+#    嵌进脚本文件里就没有长度限制 —— 那是文件，不是命令行。
+_WRITER = """\
+import base64, os, sys
+path = sys.argv[1]
+b64 = {b64!r}
+data = base64.b64decode(b64)
+d = os.path.dirname(os.path.abspath(path))
+if d and not os.path.isdir(d):
+    os.makedirs(d, exist_ok=True)
+with open(path, 'wb') as f:
+    f.write(data)
+sys.exit(0)
+"""
+
+
+def write_in_box(path: str, content: str,
+                 timeout: int = 60) -> tuple[bool, str]:
+    """在沙盒里把内容写进 path。返回 (成功, 说明)。
+
+    ⚠️ 这里**只负责让写入发生在影子里**，不负责审核和回写 ——
+       那是调用方拿到 classify_changes 之后的事
+       （engine/tools.py 的 write_file 会接着调 apply_after_run）。
+
+    ⚠️ 沙盒不可用时返回 (False, 原因)，调用方据此决定
+       是退回真机直写还是拒绝 —— 这个选择不能在这里做，
+       因为调用方才知道当时是什么安全模式。
+    """
+    import base64
+
+    if not available():
+        return False, "影子执行不可用"
+
+    data = (content or "").encode("utf-8")
+    b64 = base64.b64encode(data).decode("ascii")
+
+    # 写文件的小脚本，放在**影子层**里（不是真机）。
+    #
+    # ⚠️ 跟 run_in_box 里写 .bat 一样：必须放影子目录。
+    #    放真机路径的话沙盒里根本看不到那个文件，
+    #    跑起来就是"系统找不到指定的文件"，退出码还可能是 0。
+    stamp = f"{os.getpid()}_{int(time.time() * 1000)}"
+    tmp_real = os.path.join(
+        os.environ.get("TEMP") or os.path.expanduser("~"),
+        f"dsh_box_writer_{stamp}.py",
+    )
+    try:
+        script_shadow = _shadow_of(tmp_real)
+        os.makedirs(os.path.dirname(script_shadow), exist_ok=True)
+        with open(script_shadow, "w", encoding="ascii", newline="\n") as f:
+            f.write(_WRITER.format(b64=b64))
+    except OSError as e:
+        return False, f"写沙盒脚本失败：{e}"
+
+    # 沙盒里跑。路径两边都带引号，有空格也不会被拆开。
+    cmd = f'python "{script_shadow}" "{path}"'
+
+    try:
+        env = os.environ.copy()
+        p = run_in_box(cmd, cwd=os.path.dirname(path) or ".", env=env,
+                       timeout=timeout, capture=False)
+    except SandboxBlocked as e:
+        return False, str(e)
+    except subprocess.TimeoutExpired:
+        return False, "写文件超时"
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+    if p is None:
+        return False, "影子执行跑不起来"
+
+    return True, "已写入影子层"
+
