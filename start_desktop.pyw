@@ -252,9 +252,114 @@ def main() -> int:
         #    现在不等了 —— 界面自己先出来，后台进度显示在它上面，
         #    用户至少知道程序已经开了。
 
+    # ── 看门狗：桌面端开着它就在，桌面端关了它就停 ──
+    #
+    # ⚠️ 它挂在这个启动器下面，不挂在界面窗口下面。
+    #
+    #    为什么：界面是 subprocess.call 起的，界面一退这个函数就往下走；
+    #    api_server 是 DETACHED 起的，比界面活得久。
+    #    守护必须比"被守护的服务"活得久一点，但又不能比用户长 ——
+    #    用户关掉派活台，就是不想让它在后台待着。
+    #
+    #    所以：进来的时候起，界面退出之后叫它走。
+    _dog = _start_watchdog(pyw)
+
     # 起界面。用同一个解释器，保持依赖一致。
     os.chdir(HERE)
-    return subprocess.call([sys.executable, UI_PY], env=os.environ.copy())
+    try:
+        return subprocess.call([sys.executable, UI_PY], env=os.environ.copy())
+    finally:
+        # ⚠️ 一定要在 finally 里。
+        #
+        #    界面可能是正常关的，也可能是崩的、被强杀的 ——
+        #    但不管是哪种，用户都看不见窗口了。
+        #    这时候看门狗还留着一个后台进程，就是"我不知道它为什么还活着"。
+        _stop_watchdog(_dog)
+
+
+def _dog_dir() -> str:
+    """看门狗的停止标记放在哪 —— 跟 watchdog.py 的 BRIDGE_DIR 一致。"""
+    return HERE
+
+
+def _start_watchdog(pyw: str) -> subprocess.Popen | None:
+    """起看门狗。已经有在跑的就不再起第二个。
+
+    ⚠️ 判重换了个轻办法：**看它写的心跳文件**。
+       原来想过去枚举进程命令行，但那要起一次 PowerShell
+       （WMI 查询很慢），每次开桌面端都卡一下不值当。
+
+       看门狗自己会写 watchdog.alive（见 watchdog.py 的 _touch_alive），
+       有它且足够新，就说明已经在盯着了。
+    """
+    dog_py = os.path.join(HERE, "tools", "watchdog.py")
+    if not os.path.exists(dog_py):
+        return None
+
+    # 已经在跑？
+    alive = os.path.join(HERE, "watchdog.alive")
+    try:
+        if os.path.exists(alive):
+            age = time.time() - os.path.getmtime(alive)
+            if age < 30:
+                return None
+    except OSError:
+        pass
+
+    # 起之前把旧的停止标记清掉（上次残留的话会让它一起来就退）
+    stop_file = os.path.join(HERE, "watchdog.stop")
+    try:
+        if os.path.exists(stop_file):
+            os.remove(stop_file)
+    except OSError:
+        pass
+
+    try:
+        return subprocess.Popen(
+            [pyw, dog_py],
+            cwd=HERE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=0x08000000 | 0x00000008,  # NO_WINDOW | DETACHED
+        )
+    except OSError:
+        return None
+
+
+def _stop_watchdog(dog: subprocess.Popen | None) -> None:
+    """叫看门狗退出。
+
+    ⚠️ 先写文件让它自己走，等它；等不到才强杀。
+
+       直接 kill 的话，它可能正在重启服务 —— 砍在中间，
+       服务停在半路，restart.result 也不写，
+       桌面端下次打开会以为"还在重启中"。
+    """
+    stop_file = os.path.join(HERE, "watchdog.stop")
+    try:
+        with open(stop_file, "w", encoding="utf-8") as f:
+            f.write("desktop closed\n")
+    except OSError:
+        pass
+
+    if dog is None:
+        return
+
+    try:
+        dog.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            dog.kill()
+        except OSError:
+            pass
+    # 标记留着没意义，下次起来会被 _start_watchdog 清掉；
+    # 这里顺手删了，免得用户看到个莫名其妙的文件。
+    try:
+        if os.path.exists(stop_file):
+            os.remove(stop_file)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

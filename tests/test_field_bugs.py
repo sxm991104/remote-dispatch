@@ -335,9 +335,15 @@ def test_perm_change_persists(isolated):
 
 
 def test_perm_escalation_needs_code(isolated):
-    """升权必须过验证码，降权不用。
+    """改权限一律要码（含降权）。
 
     ⚠️ 这条测的是**接口层**的行为，用打桩绕过真发邮件。
+
+    ⚠️ 而且要走**真实的入口**：_do_post 里的统一闸 _config_gate。
+       2026-11-06 起验码从 _perms_set 挪到了闸里（清单 + 统一一道），
+       直接调 _perms_set 等于跳过闸 —— 测的就不是线上行为了。
+
+       这里手动模拟一遍闸：没码就发码回 need_code，带了码先验再进 setter。
     """
     from guard import guard
     from guard import task_perms
@@ -366,21 +372,37 @@ def test_perm_escalation_needs_code(isolated):
 
         h = api.Handler.__new__(api.Handler)
 
-        # 降到工作区：不用码
+        def gate_then_set(body):
+            """模拟 _config_gate：没码发码，带码就验，过了才进 setter。"""
+            purpose = api.Handler._config_purpose("/api/perms", body)
+            code = (body.get("code") or "").strip()
+            if not code:
+                ok, _ = guard.send_code_email(purpose, "改权限")
+                return {"ok": False, "need_code": True,
+                        "message": "已发" if ok else "发码失败"}
+            ok, msg = guard.verify(purpose, code)
+            if not ok:
+                return {"ok": False, "need_code": True, "error": msg}
+            return h._perms_set(body)
+
+        # 降到工作区：现在也要码
+        #
+        # ⚠️ 行为变了。原来是"降权不要码"（收窄只会更安全）。
+        #    现在统一闸对 /api/perms 一律要码 ——
+        #    不留"哪个动作不用码"这种要在两处对齐的规则。
         task_perms.set_level("升权测试", "full")
-        r = h._perms_set({"name": "升权测试", "level": "workspace"})
-        assert r.get("ok") is True
-        assert r.get("need_code") is None
-        assert task_perms.get_level("升权测试") == "workspace"
+        r = gate_then_set({"name": "升权测试", "level": "workspace"})
+        assert r.get("need_code") is True
+        assert task_perms.get_level("升权测试") == "full", "没验码就降了"
 
         # 升到 full：要码
-        r = h._perms_set({"name": "升权测试", "level": "full"})
+        r = gate_then_set({"name": "升权测试", "level": "full"})
         assert r.get("need_code") is True
-        assert task_perms.get_level("升权测试") == "workspace", \
+        assert task_perms.get_level("升权测试") == "full", \
             "没验证就升上去了"
 
         # 带对码
-        r = h._perms_set(
+        r = gate_then_set(
             {"name": "升权测试", "level": "full", "code": "123456"}
         )
         assert r.get("ok") is True
@@ -439,13 +461,18 @@ def test_perm_code_bound_to_window(isolated):
         task_perms.set_level("窗口A", "workspace")
         task_perms.set_level("窗口B", "workspace")
 
-        # 给 A 发码
-        h._perms_set({"name": "窗口A", "level": "full"})
-
-        # 拿 A 的码去改 B
-        r = h._perms_set(
-            {"name": "窗口B", "level": "full", "code": "654321"}
+        # 给 A 发码（走闸：没码 → 发码）
+        purpose_a = api.Handler._config_purpose(
+            "/api/perms", {"name": "窗口A", "level": "full"}
         )
+        guard.send_code_email(purpose_a, "改权限")
+
+        # 拿 A 的码去改 B —— 闸那边按 B 的 purpose 验，指纹对不上
+        purpose_b = api.Handler._config_purpose(
+            "/api/perms", {"name": "窗口B", "level": "full"}
+        )
+        ok, _ = guard.verify(purpose_b, "654321")
+        assert not ok, "A 的码竟然能用于 B 的验收"
         assert task_perms.get_level("窗口B") == "workspace", \
             "A 的码竟然能改 B"
     finally:

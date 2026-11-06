@@ -252,9 +252,26 @@ def _resolve(path: str) -> str:
     try:
         from guard import task_perms as _tp
 
-        # 用真实路径判权限（追链接），不是用字符串形态
-        if not _tp.is_allowed(_norm_for_check(p), _LEVEL, _WORKDIR):
-            raise PermissionError(_tp.explain_denied(p, _LEVEL))
+        # ⚠️ 走**统一入口** check_access，不要分两次调。
+        #
+        #    原来这里是两段：先 is_allowed 判权限、再 is_reserved 判禁区。
+        #    结果 full 档能碰到我们项目 ——
+        #    is_reserved 明明判了"禁区"，但调用方只看了 is_allowed 的结果。
+        #
+        #    实测（2026-11-06）：full 档 is_allowed(程序目录) = True。
+        #
+        #    现在一个函数里做两件事，绕不过去。
+        #
+        #    它拦三样（三档都拦，跟权限无关）：
+        #        · 我们自己的程序目录（代码就是闸本身）
+        #        · 我们自己的配置目录（锁本身）
+        #        · 别人的工作区（那是它的活）
+        #
+        #    用真实路径判（追链接），不是字符串形态 ——
+        #    红队用 junction 逃出去过一次。
+        _ok, _why = _tp.check_access(_norm_for_check(p), _LEVEL, _WORKDIR)
+        if not _ok:
+            raise PermissionError(_why)
     except ImportError:
         pass
 

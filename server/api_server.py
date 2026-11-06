@@ -1004,6 +1004,166 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
+    # 哪些接口在"改配置"。改之前必须过码（桌面端除外）。
+    #
+    # ⚠️ 用**精确路径**，不用前缀匹配。
+    #    前缀匹配会误伤 /api/engine/models（那是只读的模型列表）。
+    _CONFIG_POSTS = {
+        "/api/engine",             # 模型配置（地址、Key、模型名）
+        "/api/engine/profiles",    # 模型档案：增删改
+        "/api/auditor",            # 审核员配置
+        "/api/perms",              # 权限档
+        "/api/guard",              # 验证码邮箱、SMTP
+        "/api/autostart",          # 开机自启
+        "/api/paths",              # 程序路径
+        # ⚠️ /api/security/mode 不在这里。
+        #
+        #    它自己在接口里判：不是桌面端就回一句"走 verified 那条路"。
+        #    放进清单的话，前台会收到一封绑在"这个接口"上的码，
+        #    而那封码在 verified 那边用不了 —— 白发一封，用户还困惑。
+        #    （2026-11-06 实测确认过。）
+    }
+
+    def _client_is_desktop(self) -> bool:
+        """这条请求是不是本机桌面端发的。
+
+        ⚠️ 只看 X-Client 这个头，不追查别的。
+
+            "能被伪造吗？" —— 能。但想清楚伪造意味着什么：
+
+                伪造它 = 声称"用户在电脑前点了这个按钮"。
+                而用户自己机器上的程序伪造它，等于用户本人授权 ——
+                那本来就该放行。
+
+                真正要防的是**从外面进来的路**（聊天软件 → 前台）。
+                前台是个 AI，它的能力边界就是工具表里有什么；
+                工具表是我们写死的，它没有"发任意 HTTP 请求"这个工具，
+                也就伪造不了任何东西。
+
+            所以这里不做额外的凭据校验 —— 那会变成"防用户自己"，
+            那是越界（用户 2026-11-06 定的）。
+        """
+        try:
+            who = (self.headers.get("X-Client") or "").strip().lower()
+            return who == "desktop"
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _config_gate(self, path: str, body: dict) -> bool:
+        """改配置前的统一闸。返回 False 表示已经回过响应了，别再往下走。
+
+        ## 规则
+
+            桌面端                     直接过
+            其它 + 不是改配置的接口     直接过
+            其它 + 是改配置的接口       必须带码
+                没带码 → 发一封，回 need_code，**不执行**
+                带了码 → 验，不过就拒绝
+
+        ## 码绑的是什么
+
+            purpose 由**接口 + 这次要改成什么**算出来，锁死这一件事：
+
+                /api/perms    perm:<窗口名>:<档位>
+                /api/guard    guard:<改了哪几项>
+                /api/engine   engine:<模型名>
+                /api/paths    paths:<改了哪几个键>
+                /api/autostart autostart:<on|off>
+                /api/auditor  auditor:<改了哪几项>
+                /api/engine/profiles profiles:<动作>
+                /api/security/mode mode:<模式>
+
+            换了窗口、换了档位、换了接口 —— 指纹都不一样，码不认。
+        """
+        if path not in self._CONFIG_POSTS:
+            return True
+        if self._client_is_desktop():
+            return True
+
+        try:
+            from guard import guard as _g
+        except ImportError:
+            # guard 不可用 → 不能假装验过了。拒绝并说清楚。
+            self._send(*_json({
+                "ok": False,
+                "error": "验证模块不可用，改配置这条路先关着。",
+            }, 500))
+            return False
+
+        purpose = self._config_purpose(path, body)
+        code = self._str_field(body, "code").strip()
+
+        # 没带码：发一封，让他去拿
+        if not code:
+            what = self._config_what(path)
+            ok, msg = _g.send_code_email(purpose, what)
+            self._send(*_json({
+                "ok": False,
+                "need_code": True,
+                "purpose": purpose,
+                "error": (
+                    f"改{what}要先验证码。"
+                    + ("已经发到你邮箱了，拿到之后填进来。" if ok else f"发码失败：{msg}")
+                ),
+            }, 400))
+            return False
+
+        ok, msg = _g.verify(purpose, code)
+        if not ok:
+            self._send(*_json({
+                "ok": False,
+                "need_code": True,
+                "purpose": purpose,
+                "error": msg or "验证码不对。",
+            }, 400))
+            return False
+
+        return True
+
+    @staticmethod
+    def _config_what(path: str) -> str:
+        """给用户看的一句话：这次在改什么。"""
+        return {
+            "/api/engine": "模型配置",
+            "/api/engine/profiles": "模型档案",
+            "/api/auditor": "安全审核员",
+            "/api/perms": "权限档",
+            "/api/guard": "验证码邮箱",
+            "/api/autostart": "开机自启",
+            "/api/paths": "程序路径",
+            "/api/security/mode": "安全模式",
+        }.get(path, "配置")
+
+    @staticmethod
+    def _config_purpose(path: str, body: dict) -> str:
+        """把这次改的东西算成一个指纹键。
+
+        ⚠️ 只取**这次真正要改的字段**，不要把整个 body 塞进去 ——
+            body 里还有 code 本身，塞进去等于每次指纹都不同。
+        """
+        def pick(*keys):
+            return "|".join(str(body.get(k) or "").strip().lower() for k in keys)
+
+        if path == "/api/perms":
+            return f"perm:{pick('name', 'level')}"
+        if path == "/api/guard":
+            return f"guard:{pick('enabled', 'email', 'smtp_host')}"
+        if path == "/api/engine":
+            return f"engine:{pick('model', 'base_url')}"
+        if path == "/api/paths":
+            # 只报改了哪些键，不报值（值可能是长路径）
+            keys = sorted(k for k in body if k != "code")
+            return "paths:" + ",".join(keys)
+        if path == "/api/autostart":
+            return f"autostart:{pick('on')}"
+        if path == "/api/auditor":
+            return f"auditor:{pick('enabled', 'model', 'base_url')}"
+        if path == "/api/engine/profiles":
+            return f"profiles:{pick('action', 'id', 'name')}"
+        if path == "/api/security/mode":
+            return f"mode:{pick('mode')}"
+        return f"config:{path}"
+
     def _do_post(self):  # noqa: N802
         if not self._guard():
             return
@@ -1011,6 +1171,40 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         if body is None:
             # _body 已经回过错误了（413 太大 / 400 不是对象），别再往下走
+            return
+
+        # ── 改配置的接口：前台必须先过码 ──
+        #
+        # ⚠️ 这一道放在**所有分支之前**，一个地方把关。
+        #
+        #    原来每个接口自己写（或者干脆没写）：
+        #        _perms_set   有码  ✓
+        #        _guard_set   没码  ✗  ← 改验证码配置不用码
+        #        _engine_set  没码  ✗
+        #        _paths_set   没码  ✗
+        #        _profiles_act 没码 ✗
+        #        /api/auditor  没码 ✗
+        #        /api/autostart 没码 ✗
+        #        /api/security/mode（旧）没码 ✗
+        #
+        #    整个项目里，一个地方漏写就是一个洞。
+        #    所以改成"清单 + 统一闸"。
+        #
+        # ## 谁要码
+        #
+        #     桌面端（X-Client: desktop）      不要
+        #         —— 用户本人在电脑前点的那一下，本身就是确认。
+        #            黑客要冒充它，得先攻破 Windows，那已经超出我们的范围。
+        #
+        #     其它（前台、任何别的调用方）      要
+        #         —— 前台暴露在聊天软件里，可能被盗号。
+        #            码发到邮箱，盗号的拿不到。
+        #
+        # ## 代码从哪来
+        #
+        #     body["code"]。带上来了就验，没带就发一封并回 need_code。
+        #     验过了**这一件事**才算数 —— purpose 锁死了这次改什么、改成什么。
+        if not self._config_gate(path, body):
             return
 
         if path == "/api/dispatch":
@@ -1190,20 +1384,42 @@ class Handler(BaseHTTPRequestHandler):
 
 
         if path == "/api/security/mode":
-            # 改安全模式。
+            # 改安全模式（**桌面端专用**）。
             #
-            # ⚠️ 这一段原来是**只读**的 —— 里面只有一句
-            #        return self._send(*_json(_sm.status()))
+            # ## ⚠️ 前台要用 /api/security/mode/verified
             #
-            #    前端点「出事可回退」→ POST 过来 → 服务端只回了一份状态，
-            #    **压根没调 set_mode**。所以模式永远停在原来那个。
-            #    前端拿到 ok=True 还挺高兴，界面也不报错。
+            #     两个接口做的是同一件事，区别只在"要不要码"：
             #
-            #    实测（2026-11-05）：老爸点「出事可回退」，
-            #    磁盘上 security_mode.json 里还是 "strict"。
+            #         /api/security/mode            桌面端 —— 用户在电脑前点，不要码
+            #         /api/security/mode/verified   前台   —— 暴露在外，必须过码
             #
-            #    注释里原来写的是「安全模式。只读。改模式在 do_POST 里」——
-            #    结果这段**就在 do_POST 里**，却是只读的。
+            #     这不是"漏了一个"，是故意的分流。
+            #
+            #     但分流得说清楚：谁走哪条。
+            #     前台要是调了这个接口，它拿不到码、也就切不成 ——
+            #     与其让它撞一头雾水，不如直接告诉它该走哪条。
+            #
+            #     所以下面先判一次：不是桌面端就回一句"走 verified"。
+            #
+            # ⚠️ 为什么这道判断不放进 _config_gate：
+            #     gate 对未知调用方一律要码（那是对的，保守）。
+            #     但这个接口对前台**没有"要码"这个选项** ——
+            #     它的码是绑在 verified 那个入口上的。
+            #     在这里拦下来并指路，比发一封用不上的码好。
+            #
+            #     （2026-11-06：验证过前台调这个接口会收到一封
+            #       它根本用不上的码。）
+            if not self._client_is_desktop():
+                return self._send(*_json({
+                    "ok": False,
+                    "need_code": True,
+                    "use": "/api/security/mode/verified",
+                    "error": (
+                        "切安全模式要走 /api/security/mode/verified ——"
+                        "那条路会发验证码。这个接口只给桌面端用。"
+                    ),
+                }, 400))
+
             from guard import security_mode as _sm
 
             mode = self._str_field(body, "mode").strip().lower()
@@ -1499,36 +1715,62 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(*_json({"ok": True, **_q.status()}))
 
                 # ── 开始静默：必须验码 ──
+                #
+                # ⚠️ 码要**绑住"关多久"**。
+                #
+                #    原来这里用的是 unlock_with_code(code) ——
+                #    那个码是"解锁任务端"的，跟时长毫无关系。
+                #
+                #    于是：用户拿"关一小时"的心意给了码，
+                #    前台实际传 seconds=86400（一天），照做。
+                #    （2026-11-06 发现的：验码和参数是两条独立的线。）
+                #
+                #    现在 purpose = f"quiet:{secs}"：
+                #        发码时绑着这个时长，
+                #        验码时也拿同一个时长去验，
+                #        换时长 → 指纹不同 → 码不认。
                 code = self._str_field(body, "code").strip()
                 seconds = body.get("seconds")
-
-                if not code:
-                    return self._send(*_json({
-                        "ok": False,
-                        "need_code": True,
-                        "error": "开静默要先验证码。先把邮箱里的码填进来。",
-                    }, 400))
-
-                # 验码。用固定的 UNLOCK_TARGET 当目标 ——
-                # 静默是全局的，不跟某个具体任务绑定。
-                ok, msg = _g.unlock_with_code(code)
-                if not ok:
-                    return self._send(*_json({
-                        "ok": False,
-                        "error": "验证码不对",
-                        "detail": msg,
-                    }, 400))
 
                 try:
                     secs = int(seconds or 0)
                 except (TypeError, ValueError):
                     secs = 0
 
+                purpose = f"quiet:{secs}"
+
+                if not code:
+                    if secs <= 0:
+                        return self._send(*_json({
+                            "ok": False,
+                            "error": "先说清楚要关多久（一句话就行，"
+                                     "比如「关一小时」「关到下午五点」）。",
+                        }, 400))
+                    ok, msg = _g.send_code_email(purpose, f"关掉验证码 {secs // 60} 分钟")
+                    return self._send(*_json({
+                        "ok": False,
+                        "need_code": True,
+                        "seconds": secs,
+                        "error": (
+                            f"关验证码要先验证码。"
+                            + (f"已经发到你邮箱了，拿到之后填进来。" if ok
+                               else f"发码失败：{msg}")
+                        ),
+                    }, 400))
+
                 if secs <= 0:
                     return self._send(*_json({
                         "ok": False,
-                        "error": "码验过了，但没说关多久。告诉我要关到几点。",
-                        "verified": True,
+                        "error": "没说关多久，码不认。先告诉我要关到几点。",
+                    }, 400))
+
+                ok, msg = _g.verify(purpose, code)
+                if not ok:
+                    return self._send(*_json({
+                        "ok": False,
+                        "need_code": True,
+                        "seconds": secs,
+                        "error": msg or "验证码不对。",
                     }, 400))
 
                 ok2, msg2 = _q.start(secs, self._str_field(body, "why") or "用户验码后关闭验证")
@@ -2377,35 +2619,15 @@ class Handler(BaseHTTPRequestHandler):
         rank = {"workspace": 0, "home": 1, "full": 2}
         widening = rank.get(level, 0) > rank.get(cur, 0)
 
-        purpose = f"perm:{name}:{level}"
-
-        if widening:
-            # 升权：必须有码
-            try:
-                from guard import guard
-            except ImportError:
-                return {"ok": False, "error": "guard 模块不可用，没法验证"}
-
-            if not code:
-                # 第一次来：发码
-                ok, msg = guard.send_code_email(purpose, "改权限")
-                return {
-                    "ok": False,
-                    "need_code": True,
-                    "name": name,
-                    "from": cur,
-                    "to": level,
-                    "message": msg if ok else f"发码失败：{msg}",
-                }
-
-            # 带码来了：验
-            ok, msg = guard.verify(purpose, code)
-            if not ok:
-                return {
-                    "ok": False,
-                    "need_code": True,
-                    "error": msg,
-                }
+        # ⚠️ 验码挪到 _config_gate 了（_do_post 最前面，统一闸）。
+        #
+        #    这里原来自己发码、自己验 —— 现在会在闸里先验一次，
+        #    到这里再验一次的话，码已经被消费掉了，永远过不去。
+        #
+        #    "升权才要码、降权不要"这个判断也跟着上移 ——
+        #    闸里对 /api/perms 一律要码。
+        #    降权也变成要码了，这是一点收紧：
+        #    宁可多一次码，也不留"哪个动作不用码"这种要在两处对齐的规则。
 
         if not tp.set_level(name, level):
             return {"ok": False, "error": "没改成功"}
@@ -2904,7 +3126,9 @@ def main() -> int:
         from core import recover as _recover
 
         _fixed = _recover.recover(
-            workspaces=os.path.join(BRIDGE_DIR, "workspaces"),
+            # ⚠️ 用 bridge.workspaces_dir()，不要自己拼 ——
+            #    路径只该有一处定义（挪位置时别漏了这个）
+            workspaces=_bridge.workspaces_dir(),
             read_tasks=_bridge._read_tasks,
             write_tasks=_bridge._write_tasks,
             now_iso=_bridge._now(),

@@ -91,6 +91,19 @@ RESULT = os.path.join(BRIDGE_DIR, "restart.result")
 #: 连续失败标志
 STUCK = os.path.join(BRIDGE_DIR, "restart.stuck")
 
+#: 叫它退出：桌面端关掉时写这个文件
+#:
+#: ⚠️ 为什么用文件而不是杀进程：
+#:    强杀（TerminateProcess）不给它收尾的机会 ——
+#:    正在重启服务的时候被砍掉，服务就停在半路上，
+#:    而且 restart.result 不会写，桌面端会一直以为"还在重启"。
+#:
+#:    写个文件让它自己走完当前动作再退，干净。
+STOP = os.path.join(BRIDGE_DIR, "watchdog.stop")
+
+#: 看门狗自己的心跳：桌面端靠它判断"是不是已经有一个在跑"
+ALIVE = os.path.join(BRIDGE_DIR, "watchdog.alive")
+
 # ── 被守护的东西 ──
 
 # 默认用当前解释器跑 atrium。
@@ -529,6 +542,13 @@ def _poll_loop(stop: threading.Event) -> None:
     _log(f"轮询模式：每 {int(CHECK_EVERY)} 秒看一次")
 
     while not stop.is_set():
+        # ⚠️ 心跳写在最前面，每圈都写。
+        #
+        #    桌面端靠这个文件判断"看门狗是不是已经在跑" ——
+        #    有它而且够新，就不再起第二个。
+        #    见 start_desktop.pyw 的 _start_watchdog。
+        _touch_alive()
+
         stop.wait(CHECK_EVERY)
         if stop.is_set():
             break
@@ -547,6 +567,19 @@ def _poll_loop(stop: threading.Event) -> None:
             _log("轮询出错：\n" + traceback.format_exc())
 
 
+def _touch_alive() -> None:
+    """留个"我还活着"的记号。
+
+    ⚠️ 只在内存里更新 mtime 也行，但写文件最省事且跨进程可见。
+       失败就算了 —— 这只是给判重用的，不能因为它挂了看门狗就停。
+    """
+    try:
+        with open(ALIVE, "w", encoding="utf-8") as f:
+            f.write(str(int(time.time())))
+    except OSError:
+        pass
+
+
 # ----------------------------------------------------------------------
 # 入口
 # ----------------------------------------------------------------------
@@ -557,6 +590,16 @@ def main() -> int:
     _log(f"守护命令：{WATCH_CMD}")
     _log(f"判活阈值：心跳 {int(DEAD_AFTER)} 秒不更新算挂")
     _log(f"冷却期：{int(COOLDOWN)} 秒；连续失败 {MAX_FAILS} 次停手")
+
+    # ⚠️ 启动时先把停止文件清掉。
+    #
+    #    不清的话，上次桌面端关了写了这个文件、进程被强杀没来得及删，
+    #    这次一起来就看见它，立刻退出 —— 表现为"看门狗怎么都起不来"。
+    try:
+        if os.path.exists(STOP):
+            os.remove(STOP)
+    except OSError:
+        pass
 
     if os.path.exists(STUCK):
         _log("⚠️ 有 .stuck 文件 —— 之前连续失败过。"
@@ -590,9 +633,29 @@ def main() -> int:
     try:
         while True:
             time.sleep(1.0)
+            # 桌面端叫它退：写完这一圈就走
+            if os.path.exists(STOP):
+                _log("看到停止标记，退出")
+                try:
+                    os.remove(STOP)
+                except OSError:
+                    pass
+                stop.set()
+                break
     except KeyboardInterrupt:
         _log("收到中断，退出")
         stop.set()
+
+    # ⚠️ 走的时候把心跳删掉。
+    #
+    #    不删的话，桌面端下次启动去看 watchdog.alive，
+    #    发现"30 秒内还有更新"（其实是我退出前最后写的那次），
+    #    以为已经有看门狗在跑，就不再起 —— 结果是这一趟没有守护。
+    try:
+        if os.path.exists(ALIVE):
+            os.remove(ALIVE)
+    except OSError:
+        pass
 
     return 0
 

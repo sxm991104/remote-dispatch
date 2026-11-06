@@ -31,11 +31,36 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# 项目自己的临时目录。不走系统的 Temp ——
-# 那个目录的权限在有些机器上会坏，见下面 --basetemp 的说明。
-_LOCAL_TMP = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_tmp"
-)
+# 测试的临时目录。
+#
+# ⚠️ 原来在项目目录下的 _tmp，现在**必须挪出去**。
+#
+#    2026-11-06 起，程序目录对任务端是只读的（Sandboxie ReadFilePath）——
+#    代码就是闸本身，改掉 guard/ 等于闸没了。
+#
+#    而 _tmp 就在项目目录里，于是：
+#        测试自己往 tmp_path 写文件 → 【这是配置】拦下来
+#        11 个"写入走影子"的测试全挂
+#
+#    这不是代码的错，是测试把临时文件放进了禁区。
+#    跟真实任务一样：它也该在自己的工作区里干活，不该往程序目录写。
+#
+# 放哪：
+#    跟任务工作区同一个地方（%LOCALAPPDATA%\dsh-bridge）——
+#    那是"用户的运行数据"，本来就不归程序目录。
+#
+# ⚠️ 但不走系统的 Temp。
+#    那个目录在有些机器上权限会坏（连 icacls 都读不了），
+#    结果 tmp_path 建不了、收尾清理抛 PermissionError。
+try:
+    _base = os.path.join(
+        os.environ.get("LOCALAPPDATA")
+        or os.path.join(os.path.expanduser("~"), "AppData", "Local"),
+        "dsh-bridge",
+    )
+    _LOCAL_TMP = os.path.join(_base, "pytest-base")
+except Exception:  # noqa: BLE001
+    _LOCAL_TMP = os.path.join(os.path.expanduser("~"), ".dsh-bridge", "pytest-base")
 
 # ⚠️ 先建出父目录。
 #    pytest 的 --basetemp 只会建最后一级，

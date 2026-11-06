@@ -373,19 +373,22 @@ def set_autostart(on: bool) -> tuple[bool, str]:
             pyw = sys.executable
         exe = pyw
 
-        _cands = [
-            os.path.join(app_dir(), "desktop", "app.py"),
-            os.path.join(app_dir(), "start_desktop.pyw"),
-        ]
-        entry = ""
-        for _c in _cands:
-            if os.path.exists(_c):
-                entry = _c
-                break
-        if not entry:
+        # ⚠️ 开机自启**只能**指向 start_desktop.pyw，不能指向 app.py。
+        #
+        #    原来这里是两个候选，desktop/app.py 排第一 ——
+        #    于是开机自启一开，开机只起了界面：
+        #        · api_server 没人起，界面上全是"连不上后台"
+        #        · 看门狗没人起，服务挂了没人拉
+        #
+        #    start_desktop.pyw 才是那个"一次把三件事办齐"的入口
+        #    （接口服务 + 看门狗 + 界面）。
+        #
+        #    实测（2026-11-06）：用户开开机自启、开机后只见空界面。
+        entry = os.path.join(app_dir(), "start_desktop.pyw")
+        if not os.path.exists(entry):
             return False, (
-                "找不到桌面端入口（desktop/app.py 或 start_desktop.pyw），"
-                "没法设开机自启。程序装了之后应该会重新生成这些文件。"
+                "找不到启动入口 start_desktop.pyw，没法设开机自启。\n"
+                "程序装了之后应该会重新生成这个文件。"
             )
         args = f'"{entry}"'
         workdir = app_dir()

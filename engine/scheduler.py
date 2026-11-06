@@ -199,11 +199,22 @@ def queue_position(profile_id: str, task_id: str) -> int:
 
 
 def _worker_log_path(task_id: str) -> str:
-    """每个任务的 worker 日志。出问题能翻。"""
+    """每个任务的 worker 日志。出问题能翻。
+
+    ⚠️ 用 bridge.workspaces_dir()，别自己拼。
+       工作目录已经挪出程序目录了（见那个函数的说明），
+       这里拼死路径的话，日志会写到不存在的地方。
+    """
     safe = "".join(
         c if (c.isalnum() or c in "-_.") else "_" for c in str(task_id)
     ) or "task"
-    return os.path.join(BRIDGE_DIR, "workspaces", safe, "worker.log")
+    try:
+        from core import bridge as _b
+
+        root = _b.workspaces_dir()
+    except Exception:  # noqa: BLE001
+        root = os.path.join(os.path.expanduser("~"), ".dsh-bridge", "workspaces")
+    return os.path.join(root, safe, "worker.log")
 
 def start_worker(task_id: str) -> None:
     """起一个后台进程真干活。跟 api_server 里那个一样。"""

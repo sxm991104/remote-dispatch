@@ -195,6 +195,42 @@ def _task_session_path(task_id: str) -> str:
     return d + ".session"
 
 
+def workspaces_dir() -> str:
+    """任务工作目录的根。
+
+    ⚠️ **不能放在桥目录里。**
+
+        原来在 <桥目录>/workspaces/ —— 那带来一个说不清的矛盾：
+
+            程序目录要设成"任务只读"（改代码 = 改闸本身，任何档都不许）
+                ↓
+            而任务的工作目录就在里面
+                ↓
+            同一个目录，一部分不能动、一部分必须能动
+                ↓
+            **要么开个口子（开口子就有别的走法），
+              要么整个关掉（任务没法干活）**
+
+        挪出来之后：程序目录整体只读，工作目录随便写，两件事不打架。
+
+    ## 放哪
+
+        %LOCALAPPDATA%\\dsh-bridge\\workspaces
+
+        跟"用户数据"是一个性质：归用户、不归程序。
+        LOCALAPPDATA 而不是 APPDATA，是因为里面可能有临时产物、大文件，
+        不该跟着漫游走。
+    """
+    try:
+        from tools import userdirs
+
+        root = os.path.join(userdirs.local_dir(), "workspaces")
+    except Exception:  # noqa: BLE001
+        # 拿不到用户目录就退回本地 —— 反正不能落回程序目录
+        root = os.path.join(os.path.expanduser("~"), ".dsh-bridge", "workspaces")
+    return root
+
+
 def _task_workdir(task_id: str) -> str:
     """每个任务一个工作目录。
 
@@ -202,7 +238,8 @@ def _task_workdir(task_id: str) -> str:
         之前所有任务都跑在 BRIDGE_DIR 里，同时开三个任务改同一个文件
         会互相踩。目录分开之后，"多开"才是真的互不干扰。
 
-    目录位置：<桥目录>/workspaces/<task_id>/
+    目录位置：<LOCALAPPDATA>/dsh-bridge/workspaces/<task_id>/
+             （挪出程序目录了 —— 见 workspaces_dir 的说明）
     """
     # ⚠️ 这是最要紧的一处：任务的工作目录。
     #
@@ -210,7 +247,7 @@ def _task_workdir(task_id: str) -> str:
     #    建出了文件夹。攻击者能往系统目录写，也能覆盖用户的文件。
     #
     #    这里用 safe_join：校验名字 + 校验真实路径在根目录里。
-    d = safe_join(os.path.join(BRIDGE_DIR, "workspaces"), task_id)
+    d = safe_join(workspaces_dir(), task_id)
     os.makedirs(d, exist_ok=True)
     return d
 

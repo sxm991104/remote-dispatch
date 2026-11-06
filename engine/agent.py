@@ -254,6 +254,140 @@ def _count_block(what: str, reason: str) -> None:
         pass
 
 
+def _check_config_paths(name: str, arguments: str) -> str | None:
+    """这个工具调用会不会碰配置禁区。会的话返回一句拦下的话。
+
+    ## ⚠️ 为什么这道闸不看安全模式、不看权限档
+
+        配置不是文件，是**锁本身**：
+
+            task_perms.json       权限表 —— 改了就能给自己升到 full
+            guard.json            验证码邮箱、SMTP
+            security_mode.json    安全模式 —— 改了就能降到"出事可回退"
+            engine.json           模型配置
+            auditor.json          审核员 —— 改了就能关掉
+            .dsh/.credentials.yaml  API 密钥
+            .atrium/config.json   平台凭据
+            Startup/*.lnk         开机自启 —— 下次开机执行任意东西
+            计划任务目录
+
+        用户点「放宽到能碰桌面和下载」时，交出去的其实是上面这一整串。
+        授权那句话里一个字都没提。
+
+        （2026-11-06 被指出来：钥匙和锁放在同一个抽屉里，
+         而 home 档的权限是"这个抽屉随便开"。）
+
+    ## 怎么判
+
+        · read_file / write_file / edit_file / list_dir / search_files
+              参数里的 path 直接查
+
+        · run_command
+              把命令里出现的路径抠出来（guard.changelog 那个抠法），
+              逐个查
+
+        抠不出来的（`python script.py` 里面的）这里管不到 ——
+        但配置文件改了不会立刻生效，下次运行才读；而且
+        沙盒断网 + 审计员还挡着。
+
+    ## 为什么返回"拦下的话"而不是抛异常
+
+        跟 _check_action 一样：让模型知道被拦了、为什么，
+        它能换个做法或者告诉用户。抛异常会让整个任务挂掉。
+    """
+    try:
+        from guard import task_perms as _tp
+    except ImportError:
+        return None
+
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else (arguments or {})
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(args, dict):
+        return None
+
+    # ── 一、文件工具：直接看 path ──
+    if name in ("read_file", "write_file", "edit_file",
+                "list_dir", "search_files"):
+        p = str(args.get("path") or "").strip()
+        if not p:
+            return None
+        try:
+            p = os.path.expanduser(p)
+            if not os.path.isabs(p):
+                p = os.path.join(_workdir_now(), p)
+            # ⚠️ 要带工作目录 —— 不带的话自己的工作区也算禁区（从严那档）。
+            if _tp.is_reserved(p, _workdir_now()):
+                _count_block(p, f"要动配置：{p}")
+                return _tp.explain_reserved(p)
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    # ── 二、run_command：抠路径 ──
+    if name == "run_command":
+        cmd = str(args.get("command") or "")
+        if not cmd:
+            return None
+        try:
+            from guard import changelog as _cl
+
+            # ⚠️ 相对路径要按**任务的工作目录**解析，不能按进程目录。
+            #
+            #    实测（2026-11-06）：任务在自己的工作区里跑
+            #        echo hi > out.txt
+            #    抠出来变成 <程序目录>\out.txt ——
+            #    因为抠取那边用的是 os.path.abspath，按进程目录算。
+            #    于是"往自己工作区写个文件"被判成"改程序目录"，
+            #    正常干活被拦，报一句【这是配置】。
+            #
+            #    所以把工作目录传进去。
+            #
+            # ⚠️ 而且 is_reserved 也要带上工作目录。
+            #
+            #    is_reserved 的规则是：工作区根是禁区，但**自己的工作区**不是。
+            #    不传 workdir 的话它按"任何工作区都算禁区"处理（从严）——
+            #    于是往自己工作区写文件也被拦。
+            #
+            #    实测（2026-11-06）：传了 base 但没传 workdir，
+            #    echo hi > out.txt 还是被拦，报"这是配置"。
+            _wd = _workdir_now()
+            for p in _cl._paths_in_command(cmd, base=_wd):
+                if _tp.is_reserved(p, _wd):
+                    try:
+                        from guard import guard_gate as _g
+
+                        _hit = _g.intercept(cmd, f"要动配置：{p}")
+                        _n = _hit.get("count", 0)
+                        _trip = _hit.get("tripped", False)
+                    except Exception:  # noqa: BLE001
+                        _n, _trip = 0, False
+
+                    return (
+                        _tp.explain_reserved(p)
+                        + "\n"
+                        + ("（任务端已经锁死，要用得先过验证。）"
+                           if _trip
+                           else f"（这是今天第 {_n} 次被拦。）")
+                    )
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    return None
+
+
+def _workdir_now() -> str:
+    """当前任务目录。拿不到就用当前目录 —— 反正只会更严不会更松。"""
+    try:
+        from engine import tools as _t
+
+        return _t.workdir() or os.getcwd()
+    except Exception:  # noqa: BLE001
+        return os.getcwd()
+
+
 def _check_action(name: str, arguments: str) -> str | None:
     """看一眼这个工具调用要不要拦。返回 None 表示放行。
 
@@ -290,6 +424,26 @@ def _check_action(name: str, arguments: str) -> str | None:
         它跟安全模式无关 —— 工作区权限就只该能动任务目录，
         用户选 rollback 不代表允许它去写 C:\\Windows。
     """
+    # ══ 配置禁区：**在模式判断之前**，哪一档都拦 ══
+    #
+    # ⚠️ 这一段必须在下面"先看模式"之前。
+    #
+    #    实测（2026-11-06）：第一版把配置检查放在模式判断之后，
+    #    于是 rollback 档（wants("guard")=False）直接 return None ——
+    #    配置检查根本没跑到，`type guard.json` 一路放行。
+    #
+    #    而 rollback 的定义是"别拦危险命令，出事我退回去" ——
+    #    那条覆盖的是**危险动作**，不是"能改掉锁本身"。
+    #
+    #    配置是锁，不是文件。放开它，回退也没意义了：
+    #    任务端能先把权限表改成 full、把验证码关掉，
+    #    再干任何事 —— 退回去只是退文件，锁已经没了。
+    #
+    #    所以这一条跟安全模式和权限档都无关。
+    _cfg_try = _check_config_paths(name, arguments)
+    if _cfg_try is not None:
+        return _cfg_try
+
     # ── 先看模式 ──
     try:
         from guard import security_mode as _sm
@@ -372,6 +526,18 @@ def _check_action(name: str, arguments: str) -> str | None:
         #    现在独立判断，不看上面有没有命中。
         if not reason and ag.touches_protected(cmd):
             reason = "要动的是我自己的安全配置"
+
+        # ⚠️ 配置禁区**不在这里判** —— 见 _check_config_paths。
+        #
+        #    我一开始把那段写在这里（"第四层半"），后来又在
+        #    _check_config_paths 里写了一份完整的。两份同时跑，出过这个：
+        #
+        #        任务在工作区里写 out.txt → 判成"改程序目录"被拦
+        #        （这里那份没传工作目录，相对路径按进程目录解析）
+        #
+        #    一份就够，两份必然分叉。配置检查在 _check_action 的最前面
+        #    就已经跑过了（_check_config_paths），而且它比这里更完整：
+        #    文件工具和命令都管，路径抠取也按任务工作目录算。
 
         # 第四层：系统级破坏 + 下载执行
         #

@@ -74,7 +74,7 @@ def paths_in_args(name: str, args: dict) -> list[str]:
     return out
 
 
-def _paths_in_command(cmd: str) -> list[str]:
+def _paths_in_command(cmd: str, base: str = "") -> list[str]:
     """从一条命令里抠出它会碰哪些路径。
 
     ## ⚠️ 这是启发式，不可能完美
@@ -92,15 +92,33 @@ def _paths_in_command(cmd: str) -> list[str]:
 
         宁可粗一点，也别假装精确 ——
         精确的假信息比模糊的真信息更害人。
+
+    ## ⚠️ 相对路径按谁算（base）
+
+        传 base 就按它解析，不传就按进程当前目录。
+
+        实测（2026-11-06）：任务在自己的工作区里跑
+            echo hi > out.txt
+        out.txt 抠出来变成了 <程序目录>\\out.txt ——
+        因为这里用的是 os.path.abspath，那是按**进程目录**算的。
+        于是"往自己工作区写个文件"被判成"改程序目录"，正常干活被拦。
+
+        所以调用方要把任务的工作目录传进来。
     """
     out: list[str] = []
     c = cmd or ""
+
+    def _abs(p: str) -> str:
+        """相对路径按 base 解析。"""
+        if base and not os.path.isabs(p):
+            return os.path.normpath(os.path.join(base, p))
+        return os.path.abspath(p)
 
     # Windows 绝对路径：字母:\...
     for m in re.finditer(r"[A-Za-z]:[\\/][^\s\"'<>|&;]*", c):
         p = m.group(0).rstrip("\\/")
         if len(p) > 2:
-            out.append(os.path.abspath(p))
+            out.append(_abs(p))
 
     # Unix 绝对路径（只取看起来像项目目录的，别把 /bin/ls 也记上）
     for m in re.finditer(r"(?<![\w:])(/(?:home|root|tmp|opt|var|usr/local)[^\s\"'<>|&;]*)", c):
@@ -108,13 +126,13 @@ def _paths_in_command(cmd: str) -> list[str]:
 
     # 相对路径：./xxx  ../xxx  dir/file.ext
     for m in re.finditer(r"(?<![\w./-])(\.{0,2}/[^\s\"'<>|&;]+)", c):
-        out.append(os.path.abspath(m.group(1)))
+        out.append(_abs(m.group(1)))
 
-    # 重定向目标
+    # 重定向目标（> file  >> file）
     for m in re.finditer(r">>?\s*([^\s\"'<>|&;]+)", c):
         t = m.group(1).strip()
         if t and t not in ("/dev/null", "NUL", "nul"):
-            out.append(os.path.abspath(t))
+            out.append(_abs(t))
 
     # 去重保序
     seen = set()

@@ -122,23 +122,75 @@ if api is None:
 
 h = api.Handler.__new__(api.Handler)
 
+
+# ⚠️ 验码挪到 _do_post 的**统一闸**（_config_gate）了，setter 自己不再验。
+#
+#    2026-11-06 改的：原来每个 setter 各写各的（_perms_set 有、_guard_set 没有……），
+#    一个地方漏写就是一个洞。现在清单 + 统一闸。
+#
+#    所以直接调 _through_gate(...) 测的是"没有闸的世界"，
+#    测出来跟线上行为对不上 —— 这里补一层，模拟闸：
+#
+#        没码   → 闸发码、回 need_code、不执行
+#        带了码 → 闸验、过了才进 setter
+#
+#    这样这个脚本测的才是真实路径。
+
+
+def _through_gate(body: dict) -> dict:
+    """模拟 _do_post 里的 _config_gate + setter。"""
+    import time as _t
+
+    purpose = api.Handler._config_purpose("/api/perms", body)
+    code = (body.get("code") or "").strip()
+
+    if not code:
+        # 闸：发码，不执行。每次来都发（真实服务端就是这样）。
+        fp = guard._fingerprint(purpose)
+        guard._state.pending[fp] = guard.PendingCode(
+            code="123456", task=purpose, purpose="改权限",
+            expires=_t.time() + 120,
+        )
+        return {
+            "ok": False,
+            "need_code": True,
+            "purpose": purpose,
+            "message": "验证码已发到邮箱（测试桩）",
+        }
+
+    ok, msg = guard.verify(purpose, code)
+    if not ok:
+        return {"ok": False, "need_code": True, "error": msg}
+
+    # 验过了 —— 进 setter（这里才是真正改权限的地方）
+    return h._perms_set(body)
+
+
 print("=" * 68)
-print("1. 降权：不用码")
+print("1. 降权：也要码（收紧了一点）")
 print("=" * 68)
+# ⚠️ 这一条的行为变了。
+#
+#    原来是"降权不要码"（收窄只会更安全）。
+#    现在统一闸对 /api/perms 一律要码 ——
+#    不留"哪个动作不用码"这种要在两处对齐的规则，宁可多一次码。
 task_perms.set_level("任务A", "full")
 ck("先设成 full", task_perms.get_level("任务A"), "full")
 
-r = h._perms_set({"name": "任务A", "level": "workspace"})
-ck("降权直接成功", r.get("ok"), True)
+r = _through_gate({"name": "任务A", "level": "workspace"})
+ck("降权也要码", r.get("need_code"), True)
+ck("还没生效", task_perms.get_level("任务A"), "full")
+
+r = _through_gate({"name": "任务A", "level": "workspace", "code": "123456"})
+ck("带码后降权成功", r.get("ok"), True)
 ck("权限真的变了", task_perms.get_level("任务A"), "workspace")
-ck("不需要验证", r.get("need_code"), None)
 
 print("\n" + "=" * 68)
 print("2. 升权：第一次发码，不生效")
 print("=" * 68)
 task_perms.set_level("任务B", "workspace")
 
-r = h._perms_set({"name": "任务B", "level": "full"})
+r = _through_gate({"name": "任务B", "level": "full"})
 ck("要求验证码", r.get("need_code"), True)
 ck("还没生效", task_perms.get_level("任务B"), "workspace")
 print(f"      提示：{r.get('message', '')[:60]}")
@@ -149,13 +201,14 @@ print("=" * 68)
 # 直接从 guard 的内部状态拿码（模拟用户从邮箱看到）
 from guard import guard  # noqa: E402
 
-fp = guard._fingerprint("perm:任务B:full")
+fp = guard._fingerprint(api.Handler._config_purpose("/api/perms",
+            {"name": "任务B", "level": "full"}))
 p = guard._state.pending.get(fp)
 if p:
     real_code = p.code
     print(f"      （模拟从邮箱拿到码：{real_code}）")
 
-    r = h._perms_set({"name": "任务B", "level": "full", "code": real_code})
+    r = _through_gate({"name": "任务B", "level": "full", "code": real_code})
     ck("改成功了", r.get("ok"), True)
     ck("权限真的变了", task_perms.get_level("任务B"), "full")
 else:
@@ -168,9 +221,9 @@ print("=" * 68)
 task_perms.set_level("任务C", "workspace")
 
 # 先发码
-h._perms_set({"name": "任务C", "level": "home"})
+_through_gate({"name": "任务C", "level": "home"})
 
-r = h._perms_set({"name": "任务C", "level": "home", "code": "000000"})
+r = _through_gate({"name": "任务C", "level": "home", "code": "000000"})
 ck("被拒", r.get("ok"), False)
 ck("权限没变", task_perms.get_level("任务C"), "workspace")
 
@@ -178,7 +231,7 @@ print("\n" + "=" * 68)
 print("5. 通配符 → 拒绝")
 print("=" * 68)
 for name in ("*", "任务*", "all", "?"):
-    r = h._perms_set({"name": name, "level": "full"})
+    r = _through_gate({"name": name, "level": "full"})
     # "*" "任务*" "?" 该拒；"all" 只是个普通名字，不该拒
     if name in ("*", "任务*", "?"):
         ck(f"拒绝通配符 {name!r}", r.get("ok"), False)
@@ -191,13 +244,14 @@ task_perms.set_level("任务D", "workspace")
 task_perms.set_level("任务E", "workspace")
 
 # 给 D 发码
-h._perms_set({"name": "任务D", "level": "full"})
-fp_d = guard._fingerprint("perm:任务D:full")
+_through_gate({"name": "任务D", "level": "full"})
+fp_d = guard._fingerprint(api.Handler._config_purpose("/api/perms",
+            {"name": "任务D", "level": "full"}))
 pd = guard._state.pending.get(fp_d)
 
 if pd:
     # 拿 D 的码去改 E
-    r = h._perms_set({"name": "任务E", "level": "full", "code": pd.code})
+    r = _through_gate({"name": "任务E", "level": "full", "code": pd.code})
     ck("D 的码改不了 E", task_perms.get_level("任务E"), "workspace")
 
 print("\n" + "=" * 68)
